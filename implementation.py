@@ -2,14 +2,13 @@ import numpy as np
 import requests
 from sgp4.api import Satrec
 from sgp4.api import jday
-import matplotlib.pyplot as plt
+import plotly.graph_objs as go
 from datetime import datetime, timedelta, timezone
-from mpl_toolkits.mplot3d import Axes3D
-from tqdm import tqdm  # For the progress bar
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor
 
 # Function to fetch TLE data from a URL
 def fetch_tle_data(url):
-    print(f"Fetching TLE data from {url}")
     response = requests.get(url)
     if response.status_code == 200:
         tle_data = response.text.splitlines()
@@ -17,15 +16,15 @@ def fetch_tle_data(url):
     else:
         raise Exception(f"Error fetching TLE data: {response.status_code}")
 
-# Convert epoch year and days to a timezone-aware datetime object in UTC
+# Convert epoch year and days to a timezone-aware datetime object
 def convert_epoch_to_datetime(epochyr, epochdays):
     year = int(epochyr)
     if year < 57:  # Handling for years below 57 (assumed to be post-2000, as per SGP4 standard)
         year += 2000
     else:
         year += 1900
-    epoch = datetime(year, 1, 1) + timedelta(days=epochdays - 1)
-    return epoch.replace(tzinfo=timezone.utc)  # Set timezone to UTC
+    epoch = datetime(year, 1, 1, tzinfo=timezone.utc) + timedelta(days=epochdays - 1)  # Make it timezone-aware
+    return epoch
 
 # Check if the TLE data is outdated (e.g., older than 30 days)
 def tle_is_outdated(epochyr, epochdays):
@@ -44,66 +43,101 @@ def calculate_orbit_positions(tle_group, time_range):
         return None
 
     positions = []
-    for t in np.linspace(0, time_range, 10):  # Reduced points for clarity
+    for t in np.linspace(0, time_range, 500):  # Increase the number of points for smoothness
         jd, fr = jday(2024, 10, 9, 12, 0, 0 + t)  # Adjust based on time range
         e, r, v = satellite.sgp4(jd, fr)  # Get position (r) and velocity (v)
         if e == 0:  # Only add positions if no error occurred
-            positions.append((r, v))  # Store both position and velocity
+            positions.append(r)
         else:
             print(f"Error {e}: skipping {name}")
-            return None
+            return None  # Skip this satellite if there's an error
     return positions
 
-# Function to plot key locations and short trajectories
-def plot_orbits_and_trajectories(active_positions, debris_positions, ax):
-    collision_points = []  # Store collision points
+# Function to dynamically adjust axis limits based on data
+def get_dynamic_limits(positions):
+    all_positions = np.concatenate(positions)
+    max_val = np.max(np.abs(all_positions))
+    return [-max_val, max_val]
 
-    # Plot active satellites as points with short trajectories
+# Function to add a transparent Earth to the plot
+def add_earth_to_plot(fig):
+    # Create a transparent Earth for visual reference
+    theta = np.linspace(0, 2 * np.pi, 100)
+    phi = np.linspace(0, np.pi, 100)
+    theta, phi = np.meshgrid(theta, phi)
+    
+    r = 6371  # Approximate Earth radius in kilometers
+    x = r * np.sin(phi) * np.cos(theta)
+    y = r * np.sin(phi) * np.sin(theta)
+    z = r * np.cos(phi)
+    
+    # Add surface for Earth
+    fig.add_trace(go.Surface(
+        x=x, y=y, z=z,
+        colorscale=[[0, 'rgba(0, 0, 0, 0.1)'], [1, 'rgba(0, 0, 0, 0.1)']],  # Transparent Earth
+        showscale=False
+    ))
+
+# Function to plot orbits and check for collisions with Plotly
+def plot_orbits_and_collisions_plotly(active_positions, debris_positions, trajectory_length=10):
+    fig = go.Figure()
+
+    # Plot smooth trajectories of active satellites (without dots for past trajectory)
     for positions in active_positions:
-        pos_vals, vel_vals = zip(*positions)
-        x_vals, y_vals, z_vals = zip(*[pos for pos, vel in positions])
-        ax.scatter(x_vals, y_vals, z_vals, color='blue', alpha=0.7)  # Plot positions as dots
+        x_vals, y_vals, z_vals = zip(*positions[:-1])  # Trajectory excluding the last point
+        fig.add_trace(go.Scatter3d(
+            x=x_vals, y=y_vals, z=z_vals,
+            mode='lines',  # Line only for trajectory
+            line=dict(color='blue', width=2),
+            name='Satellite Trajectory'
+        ))
 
-        # Plot short trajectories based on velocity
-        for (pos, vel) in positions:
-            ax.plot([pos[0], pos[0] + vel[0]], [pos[1], pos[1] + vel[1]], [pos[2], pos[2] + vel[2]], color='blue', alpha=0.5)
+        # Plot the current position as a single dot (last point)
+        current_pos = positions[-1]
+        fig.add_trace(go.Scatter3d(
+            x=[current_pos[0]], y=[current_pos[1]], z=[current_pos[2]],
+            mode='markers',
+            marker=dict(size=6, color='cyan', symbol='circle'),
+            name='Current Satellite Position'
+        ))
 
-    # Plot debris as points with short trajectories
+    # Plot smooth trajectories of debris (without dots for past trajectory)
     for positions_debris in debris_positions:
-        pos_vals_debris, vel_vals_debris = zip(*positions_debris)
-        x_vals_debris, y_vals_debris, z_vals_debris = zip(*[pos for pos, vel in positions_debris])
-        ax.scatter(x_vals_debris, y_vals_debris, z_vals_debris, color='red', alpha=0.7)  # Plot positions as dots
+        x_vals_debris, y_vals_debris, z_vals_debris = zip(*positions_debris[:-1])  # Trajectory excluding the last point
+        fig.add_trace(go.Scatter3d(
+            x=x_vals_debris, y=y_vals_debris, z=z_vals_debris,
+            mode='lines',
+            line=dict(color='red', width=2),
+            name='Debris Trajectory'
+        ))
 
-        # Plot short trajectories based on velocity
-        for (pos, vel) in positions_debris:
-            ax.plot([pos[0], pos[0] + vel[0]], [pos[1], pos[1] + vel[1]], [pos[2], pos[2] + vel[2]], color='red', alpha=0.5)
+        # Plot the current position of debris as a single dot (last point)
+        current_pos_debris = positions_debris[-1]
+        fig.add_trace(go.Scatter3d(
+            x=[current_pos_debris[0]], y=[current_pos_debris[1]], z=[current_pos_debris[2]],
+            mode='markers',
+            marker=dict(size=6, color='yellow', symbol='circle'),
+            name='Current Debris Position'
+        ))
 
-    # Check for collisions and highlight collision points
-    for positions in active_positions:
-        for debris_positions in debris_positions:
-            for active_pos, _ in positions:
-                for debris_pos, _ in debris_positions:
-                    if np.linalg.norm(np.array(active_pos) - np.array(debris_pos)) < 10:  # Collision threshold
-                        collision_points.append(debris_pos)
+    # Adjust layout
+    fig.update_layout(
+        scene=dict(
+            xaxis=dict(title='X', showgrid=True),  # Show grid
+            yaxis=dict(title='Y', showgrid=True),  # Show grid
+            zaxis=dict(title='Z', showgrid=True),  # Show grid
+            bgcolor='lightgray',  # Optional background color
+        ),
+        title='3D Orbits with Current Positions and Trajectories',
+        showlegend=True,
+    )
 
-    if collision_points:
-        collision_points = np.array(collision_points)
-        ax.scatter(collision_points[:, 0], collision_points[:, 1], collision_points[:, 2], color='yellow', s=50, label="Collision Points")
+    fig.show()
 
-    # Adjust axis limits for the plot
-    ax.set_xlim([-50000, 50000])
-    ax.set_ylim([-50000, 50000])
-    ax.set_zlim([-50000, 50000])
-
-# Function to create a single plot showing orbits and collisions
-def create_orbit_plot(active_positions, debris_positions, title):
-    fig = plt.figure(figsize=(10, 10))
-    ax = fig.add_subplot(111, projection='3d')
-    ax.set_title(f"{title} - Orbits with Short Trajectories and Collision Points")
-
-    plot_orbits_and_trajectories(active_positions, debris_positions, ax)
-
-    plt.show()
+# Parallel processing for orbit calculations
+def calculate_orbits_parallel(tle_groups, time_range):
+    with ThreadPoolExecutor() as executor:
+        return list(tqdm(executor.map(lambda tle_group: calculate_orbit_positions(tle_group, time_range), tle_groups), total=len(tle_groups)))
 
 # Fetch TLE data from the provided URLs
 tle_urls = {
@@ -118,24 +152,17 @@ tle_urls = {
 # Time range for simulation (e.g., 5 days)
 time_range = 86400 * 5
 
-# Calculate orbits for each TLE group
+# Fetch and calculate orbits in parallel
 active_sats_positions = []
 debris_positions = []
 
-print("Starting to process TLE groups...")
-
-for name, url in tqdm(tle_urls.items(), desc="Processing TLE groups", unit="group"):
+for name, url in tle_urls.items():
     tle_groups = fetch_tle_data(url)  # Fetch TLE data for this group
+    positions = calculate_orbits_parallel(tle_groups[:100], time_range)  # Limit to 100 objects per group for faster processing
+    if 'debris' in name.lower():  # Classify debris vs active satellites
+        debris_positions.extend(filter(None, positions))
+    else:
+        active_sats_positions.extend(filter(None, positions))
 
-    for tle_group in tqdm(tle_groups[:10], desc=f"Processing {name}", unit="satellite"):  # Limit to 10 objects per group for faster processing
-        positions = calculate_orbit_positions(tle_group, time_range)
-        if positions:
-            if 'debris' in name.lower():  # Classify debris vs active satellites
-                debris_positions.append(positions)
-            else:
-                active_sats_positions.append(positions)
-        else:
-            print(f"Skipping satellite due to error: {name}")
-
-# Now create the plot showing orbits and collisions
-create_orbit_plot(active_sats_positions, debris_positions, "3D Orbits with Short Trajectories and Collision Points")
+# Now create the interactive 3D plot using Plotly
+plot_orbits_and_collisions_plotly(active_sats_positions, debris_positions, trajectory_length=15)
