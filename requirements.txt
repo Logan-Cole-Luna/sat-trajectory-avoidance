@@ -9,7 +9,7 @@ fonttools==4.54.1
 fsspec==2024.9.0
 gym==0.26.2
 gym-notices==0.0.8
-gymnasium==0.29.1
+gymnasium
 idna==3.10
 Jinja2==3.1.4
 kiwisolver==1.4.7
@@ -32,7 +32,6 @@ setuptools==75.1.0
 sgp4==2.23
 Shimmy==2.0.0
 six==1.16.0
-stable_baselines3==2.3.2
 sympy==1.13.3
 tenacity==9.0.0
 torch==2.4.1
