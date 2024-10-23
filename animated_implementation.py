@@ -72,126 +72,99 @@ class SatelliteAvoidanceEnv(gym.Env):
     def render(self, mode='human'):
         print(f"Satellite position: {self.satellite_position}")
 
-# Function to calculate the average distance from Earth for a given set of positions
-def average_distance_from_earth(positions):
-    """Calculate the average distance from Earth given a list of 3D positions."""
-    earth_center = np.array([0, 0, 0])  # Earth is centered at the origin
-    distances = [np.linalg.norm(pos - earth_center) for pos in positions]
-    return np.mean(distances)
 
-# Function to scale orbit duration based on inverse distance
-def dynamic_orbit_duration_inverse(distance, min_duration=50, max_duration=500, scaling_factor=5000):
-    """Dynamically scale the number of orbit points based on inverse distance from Earth."""
-    # Closer objects get shorter durations, farther objects get longer durations
-    if distance < scaling_factor:
-        duration = int(max_duration - (distance / scaling_factor) * (max_duration - min_duration))
-    else:
-        duration = max_duration
-    return duration
-
-# Function to create a 3D Earth model with a colorscale (instead of texture)
-def create_earth_model():
-    # Define spherical coordinates for the Earth model
-    u = np.linspace(0, 2 * np.pi, 100)
-    v = np.linspace(0, np.pi, 100)
-    x = 6371 * np.outer(np.cos(u), np.sin(v))  # Earth radius ~6371 km
-    y = 6371 * np.outer(np.sin(u), np.sin(v))
-    z = 6371 * np.outer(np.ones(np.size(u)), np.cos(v))
-
-    # Create a surface plot for the Earth model using a predefined colorscale (earth tones)
-    earth_model = go.Surface(
-        x=x, y=y, z=z,
-        colorscale='earth',  # Use 'earth' colorscale to simulate the Earth texture
-        cmin=0, cmax=1,
-        showscale=False,
-        hoverinfo='skip',
-        opacity=1
-    )
-
-    return earth_model
-
-# Function to plot orbits and check for collisions with Plotly
-def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_trajectory, use_dynamic_scaling=True, scaling_factor=5000):
+# Function to plot orbits and check for collisions with animation
+def plot_orbits_and_collisions_plotly_animated(active_positions, debris_positions, model_trajectory, num_steps=100):
     fig = go.Figure()
 
-    # Plot smooth trajectories of active satellites (dynamic or full path based on use_dynamic_scaling)
-    for positions in active_positions:
-        if use_dynamic_scaling:
-            avg_distance = average_distance_from_earth(positions)
-            orbit_duration = dynamic_orbit_duration_inverse(avg_distance, scaling_factor=scaling_factor)
-            x_vals, y_vals, z_vals = zip(*positions[:orbit_duration])
-        else:
-            x_vals, y_vals, z_vals = zip(*positions)
-            
+    # Create traces for active satellites and debris orbits (static lines)
+    for i, positions in enumerate(active_positions):
+        x_vals, y_vals, z_vals = zip(*positions[:num_steps])  # Full trajectory
         fig.add_trace(go.Scatter3d(
             x=x_vals, y=y_vals, z=z_vals,
-            mode='lines',
-            line=dict(color='rgba(0, 0, 255, 0.5)', width=3),
-            name=f'Satellite Orbit'
+            mode='lines',  # Static orbit line
+            line=dict(color='blue', width=1),
+            name=f'Satellite {i + 1} Orbit'
         ))
 
-        current_pos = positions[0]
+        # Create the moving satellite trace
         fig.add_trace(go.Scatter3d(
-            x=[current_pos[0]], y=[current_pos[1]], z=[current_pos[2]],
+            x=[x_vals[0]], y=[y_vals[0]], z=[z_vals[0]],
             mode='markers',
-            marker=dict(size=6, color='cyan', symbol='circle'),
-            name='Current Satellite Position'
+            marker=dict(size=6, color='cyan'),
+            name=f'Satellite {i + 1}'
         ))
 
-    # Plot smooth trajectories of debris
-    for positions_debris in debris_positions:
-        if use_dynamic_scaling:
-            avg_distance = average_distance_from_earth(positions_debris)
-            orbit_duration = dynamic_orbit_duration_inverse(avg_distance, scaling_factor=scaling_factor)
-            x_vals_debris, y_vals_debris, z_vals_debris = zip(*positions_debris[:orbit_duration])
-        else:
-            x_vals_debris, y_vals_debris, z_vals_debris = zip(*positions_debris)
-        
+    for i, positions_debris in enumerate(debris_positions):
+        x_vals_debris, y_vals_debris, z_vals_debris = zip(*positions_debris[:num_steps])  # Full trajectory
         fig.add_trace(go.Scatter3d(
             x=x_vals_debris, y=y_vals_debris, z=z_vals_debris,
-            mode='lines',
-            line=dict(color='rgba(255, 0, 0, 0.5)', width=1),
-            name=f'Debris Orbit'
+            mode='lines',  # Static orbit line
+            line=dict(color='red', width=1),
+            name=f'Debris {i + 1} Orbit'
         ))
 
-        current_pos_debris = positions_debris[0]
+        # Create the moving debris trace
         fig.add_trace(go.Scatter3d(
-            x=[current_pos_debris[0]], y=[current_pos_debris[1]], z=[current_pos_debris[2]],
+            x=[x_vals_debris[0]], y=[y_vals_debris[0]], z=[z_vals_debris[0]],
             mode='markers',
-            marker=dict(size=6, color='yellow', symbol='circle'),
-            name='Current Debris Position'
+            marker=dict(size=6, color='yellow'),
+            name=f'Debris {i + 1}'
         ))
 
-    # Plot model satellite path if available
-    if model_trajectory:
-        model_x_vals, model_y_vals, model_z_vals = zip(*model_trajectory)
-        fig.add_trace(go.Scatter3d(
-            x=model_x_vals, y=model_y_vals, z=model_z_vals,
-            mode='lines+markers',
-            line=dict(color='rgba(0, 255, 0, 0.7)', width=5),
-            marker=dict(size=4, color='lime'),
-            name='Model Satellite Path'
-        ))
+    # Define frames for the animation (only update the current position of satellites and debris)
+    frames = []
+    for step in range(1, num_steps):
+        frame_data = []
 
-    # Create the Earth model
-    earth_model = create_earth_model()
+        # Update satellite positions
+        for i, positions in enumerate(active_positions):
+            x_vals, y_vals, z_vals = zip(*positions[:num_steps])
+            frame_data.append(go.Scatter3d(
+                x=[x_vals[step]], y=[y_vals[step]], z=[z_vals[step]],
+                mode='markers',
+                marker=dict(size=6, color='cyan'),
+                name=f'Satellite {i + 1}'
+            ))
 
-    # Add Earth model to the figure
-    fig.add_trace(earth_model)
+        # Update debris positions
+        for i, positions_debris in enumerate(debris_positions):
+            x_vals_debris, y_vals_debris, z_vals_debris = zip(*positions_debris[:num_steps])
+            frame_data.append(go.Scatter3d(
+                x=[x_vals_debris[step]], y=[y_vals_debris[step]], z=[z_vals_debris[step]],
+                mode='markers',
+                marker=dict(size=6, color='yellow'),
+                name=f'Debris {i + 1}'
+            ))
 
-    # Update layout for 3D plot with a space-like background
+        frames.append(go.Frame(data=frame_data, name=str(step)))
+
+    # Add animation controls
+   # Add animation controls
     fig.update_layout(
         scene=dict(
-            xaxis=dict(showbackground=False),
-            yaxis=dict(showbackground=False),
-            zaxis=dict(showbackground=False),
-            aspectmode="data",
-            bgcolor="black"
+            xaxis=dict(title='X', showgrid=False),
+            yaxis=dict(title='Y', showgrid=False),
+            zaxis=dict(title='Z', showgrid=False),
+            bgcolor="black"  # Space-like background
         ),
-        title='3D Orbits with Earth and Debris',
-        showlegend=True
+        title="Animated Satellite and Debris Trajectories",
+        updatemenus=[dict(type="buttons",
+                        buttons=[dict(label="Play",
+                                        method="animate",
+                                        args=[None, dict(frame=dict(duration=50, redraw=True), fromcurrent=True)]),
+                                dict(label="Pause",
+                                        method="animate",
+                                        args=[[None], dict(frame=dict(duration=0, redraw=False))])  # Fixed parenthesis
+                                ]
+                        )
+                    ]
     )
 
+    # Set frames for animation
+    fig.frames = frames
+
+    # Show the animated plot
     fig.show()
 
 
@@ -242,7 +215,7 @@ def calculate_orbit_positions(tle_group, time_range):
         return None
 
     positions = []
-    for t in np.linspace(0, time_range, 1000):  # Increase the number of points for smoothness
+    for t in np.linspace(0, time_range, 800):  # Increase the number of points for smoothness
         jd, fr = jday(2024, 10, 9, 12, 0, 0 + t)  # Adjust based on time range
         e, r, v = satellite.sgp4(jd, fr)  # Get position (r) and velocity (v)
         if e == 0:  # Only add positions if no error occurred
@@ -251,12 +224,6 @@ def calculate_orbit_positions(tle_group, time_range):
             print(f"Error {e}: skipping {name}")
             return None  # Skip this satellite if there's an error
     return positions
-
-# Function to dynamically adjust axis limits based on data
-def get_dynamic_limits(positions):
-    all_positions = np.concatenate(positions)
-    max_val = np.max(np.abs(all_positions))
-    return [-max_val, max_val]
 
 # Parallel processing for orbit calculations
 def calculate_orbits_parallel(tle_groups, time_range):
@@ -274,7 +241,7 @@ tle_urls = {
 }
 
 # Time range for simulation (e.g., 5 days)
-time_range = 86400 * 5
+time_range = 86400
 
 # Fetch and calculate orbits in parallel
 active_sats_positions = []
@@ -296,7 +263,7 @@ if use_model:
     env = SatelliteAvoidanceEnv(debris_positions_sample)  # Create the environment
 
     # Load the saved PPO model
-    model = PPO.load("satellite_avoidance_model_old")
+    model = PPO.load("satellite_avoidance_model")
 
     # Test the model and collect positions for plotting
     model_trajectory = []
@@ -310,14 +277,10 @@ if use_model:
 else:
     model_trajectory = None
 
-# Example usage when fetching TLE data
-use_dynamic_scaling = True  # Set to True for dynamic orbit plotting, False for full orbits
-
-# Now create the interactive 3D plot using Plotly
-plot_orbits_and_collisions_plotly(
+# Now create the interactive 3D plot using Plotly with animation
+plot_orbits_and_collisions_plotly_animated(
     active_sats_positions,
     debris_positions,
     model_trajectory=model_trajectory,
-    use_dynamic_scaling=use_dynamic_scaling,  # Control whether to dynamically scale or plot full paths
-    scaling_factor=500  # Adjust this value to fine-tune dynamic scaling
+    num_steps=100  # Number of steps for the animation
 )
