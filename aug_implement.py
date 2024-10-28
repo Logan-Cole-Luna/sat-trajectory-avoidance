@@ -8,6 +8,35 @@ from concurrent.futures import ThreadPoolExecutor
 from stable_baselines3 import PPO
 import gymnasium as gym
 from gymnasium import spaces
+from astropy import units as u
+from poliastro.bodies import Earth
+from poliastro.twobody import Orbit
+from astropy.time import Time
+
+# Constants for orbit and gravitational force
+G = 6.67430e-11  # Gravitational constant in m^3 kg^−1 s^−2
+M = 5.972e24  # Mass of Earth in kg
+EARTH_RADIUS = 6371e3  # Earth's radius in meters
+
+# Function to fetch TLE data from a URL or fallback to a local file
+def fetch_tle_data(url, local_file_path):
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            tle_data = response.text.splitlines()
+            return [tle_data[i:i + 3] for i in range(0, len(tle_data), 3)]  # Group into 3 (Name, Line1, Line2)
+        else:
+            print(f"Error fetching TLE data: {response.status_code}, switching to local file.")
+    except Exception as e:
+        print(f"Error fetching TLE data from URL: {e}, switching to local file.")
+
+    # Fallback to local file if fetching fails
+    try:
+        with open(local_file_path, 'r') as file:
+            tle_data = file.read().splitlines()
+            return [tle_data[i:i + 3] for i in range(0, len(tle_data), 3)]  # Group into 3 (Name, Line1, Line2)
+    except Exception as e:
+        raise Exception(f"Error reading local TLE file '{local_file_path}': {e}")
 
 # Custom Satellite Avoidance Environment
 class SatelliteAvoidanceEnv(gym.Env):
@@ -26,15 +55,34 @@ class SatelliteAvoidanceEnv(gym.Env):
             low=-np.inf, high=np.inf, shape=(3 + self.max_debris * 3,), dtype=np.float32
         )
 
-        # Satellite initial position and velocity
-        self.satellite_position = np.array([7000.0, 0.0, 0.0], dtype=np.float64)
-        self.satellite_velocity = np.zeros(3, dtype=np.float64)
+        # Satellite initial position and velocity for elliptical orbit
+        self.initial_orbit = Orbit.circular(Earth, alt=700 * u.km)  # 700 km altitude circular orbit
+        self.satellite_position = self.initial_orbit.r.to(u.m).value  # Satellite position in meters
+        self.satellite_velocity = self.initial_orbit.v.to(u.m / u.s).value  # Satellite velocity in meters per second
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        self.satellite_position = np.array([7000.0, 0.0, 0.0], dtype=np.float64)
-        self.satellite_velocity = np.zeros(3, dtype=np.float64)
-        return self._get_obs()
+        # Reset satellite to elliptical orbit parameters
+        self.initial_orbit = Orbit.from_classical(
+            Earth, 
+            a=(7000 * u.km),  # Semi-major axis in km
+            ecc=0.001 * u.one,  # Very low eccentricity (near-circular orbit)
+            inc=28.5 * u.deg,  # Inclination in degrees
+            raan=0.0 * u.deg,  # Right Ascension of Ascending Node in degrees
+            argp=0.0 * u.deg,  # Argument of Periapsis in degrees
+            nu=0.0 * u.deg,  # True anomaly (initial position)
+            epoch=Time.now()
+        )
+
+        # Update satellite position and velocity from the orbit
+        self.satellite_position = self.initial_orbit.r.to(u.m).value  # Reset to 7000 km altitude
+        self.satellite_velocity = self.initial_orbit.v.to(u.m / u.s).value  # Velocity for elliptical orbit
+
+        # Dynamically set a new number of debris
+        num_debris = np.random.randint(1, self.max_debris + 1)
+        self.debris_positions = [np.random.randn(3) * 10000 for _ in range(num_debris)]
+
+        return self._get_obs()  # Only return observation, no info dict
 
     def _get_obs(self):
         # Flatten debris positions
@@ -50,27 +98,76 @@ class SatelliteAvoidanceEnv(gym.Env):
         # Return satellite position concatenated with debris positions
         return np.concatenate([self.satellite_position, debris_flat])
 
-    def step(self, action):
-        # Update satellite's velocity and position
-        self.satellite_velocity += action
-        self.satellite_position += self.satellite_velocity
+    def _apply_gravitational_force(self):
+        # Calculate the distance from the Earth's center
+        r = np.linalg.norm(self.satellite_position)
 
-        # Calculate reward
-        reward = -np.linalg.norm(self.satellite_velocity)  # Penalize speed
+        # Newton's law of universal gravitation
+        force_magnitude = G * M / r**2
+        force_direction = -self.satellite_position / r  # Direction towards Earth's center
+        gravitational_force = force_magnitude * force_direction
+
+        # Update velocity (F = ma, assume satellite mass = 1 for simplicity)
+        self.satellite_velocity += gravitational_force
+
+    def step(self, action):
+        # Apply action to adjust velocity (scaled for more realistic impact)
+        self.satellite_velocity += action * 0.01  # Scale action to reduce the effect
+
+        # Apply gravitational force (adjusts velocity based on distance to Earth)
+        self._apply_gravitational_force()
+
+        # Update satellite's position based on velocity
+        self.satellite_position += self.satellite_velocity * 10  # Simulate for 10 seconds
+
+        # Calculate the distance from the center of the Earth
+        distance_from_earth_center = np.linalg.norm(self.satellite_position)
+        
+        # Initialize reward and done flag
+        reward = -np.linalg.norm(self.satellite_velocity)  # Penalize for high velocity
         done = False
+
+        # Earth radius buffer for entering atmosphere (100 km buffer above Earth's surface)
+        buffer_altitude = 100e3  # 100 km above Earth's surface
+
+        # Penalty for crashing into the Earth or entering the atmosphere buffer
+        if distance_from_earth_center < EARTH_RADIUS + buffer_altitude:
+            if distance_from_earth_center < EARTH_RADIUS:
+                reward -= 1000  # Large penalty for crashing into Earth
+            else:
+                reward -= 500  # Penalty for entering atmosphere buffer
+            done = True
 
         # Check for collisions with debris
         for debris in self.debris_positions:
-            distance = np.linalg.norm(self.satellite_position - debris)
-            if distance < 10:  # Collision threshold
-                reward -= 100  # Penalty for collision
+            distance_to_debris = np.linalg.norm(self.satellite_position - debris)
+            if distance_to_debris < 10:  # Collision threshold
+                reward -= 100  # Large penalty for collisions
                 done = True
 
-        reward -= 0.1  # Time penalty for efficiency
-        return self._get_obs(), reward, done, {}
+        reward -= 0.1  # Small time penalty to incentivize efficiency
+        truncated = False
+
+        return self._get_obs(), reward, done, truncated
 
     def render(self, mode='human'):
         print(f"Satellite position: {self.satellite_position}")
+
+# Function to calculate orbits in parallel
+def calculate_orbits_parallel(tle_groups, time_range):
+    def calculate_single_orbit(tle_group):
+        name, line1, line2 = tle_group
+        satellite = Satrec.twoline2rv(line1, line2)
+        positions = []
+        for t in np.linspace(0, time_range, 1000):
+            jd, fr = jday(2024, 10, 9, 12, 0, 0 + t)
+            e, r, v = satellite.sgp4(jd, fr)
+            if e == 0:
+                positions.append(r)
+        return positions if len(positions) > 0 else None
+
+    with ThreadPoolExecutor() as executor:
+        return list(tqdm(executor.map(calculate_single_orbit, tle_groups), total=len(tle_groups)))
 
 # Function to calculate the average distance from Earth for a given set of positions
 def average_distance_from_earth(positions):
@@ -195,129 +292,49 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_
     fig.show()
 
 
-# Function to fetch TLE data from a URL or fallback to a local file
-def fetch_tle_data(url, local_file_path):
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            tle_data = response.text.splitlines()
-            return [tle_data[i:i+3] for i in range(0, len(tle_data), 3)]  # Group into 3 (Name, Line1, Line2)
-        else:
-            print(f"Error fetching TLE data: {response.status_code}, switching to local file.")
-    except Exception as e:
-        print(f"Error fetching TLE data from URL: {e}, switching to local file.")
-
-    # Fallback to local file if fetching fails
-    try:
-        with open(local_file_path, 'r') as file:
-            tle_data = file.read().splitlines()
-            return [tle_data[i:i+3] for i in range(0, len(tle_data), 3)]  # Group into 3 (Name, Line1, Line2)
-    except Exception as e:
-        raise Exception(f"Error reading local TLE file '{local_file_path}': {e}")
-
-# Convert epoch year and days to a timezone-aware datetime object
-def convert_epoch_to_datetime(epochyr, epochdays):
-    year = int(epochyr)
-    if year < 57:  # Handling for years below 57 (assumed to be post-2000, as per SGP4 standard)
-        year += 2000
-    else:
-        year += 1900
-    epoch = datetime(year, 1, 1, tzinfo=timezone.utc) + timedelta(days=epochdays - 1)  # Make it timezone-aware
-    return epoch
-
-# Check if the TLE data is outdated
-def tle_is_outdated(epochyr, epochdays):
-    tle_datetime = convert_epoch_to_datetime(epochyr, epochdays)
-    days_old = (datetime.now(timezone.utc) - tle_datetime).days  # Use timezone-aware UTC datetime
-    return days_old > 30  # Example: treat as outdated if older than 30 days
-
-# Function to calculate satellite positions using TLE data
-def calculate_orbit_positions(tle_group, time_range):
-    name, line1, line2 = tle_group
-    satellite = Satrec.twoline2rv(line1, line2)
-
-    # Check if the TLE data is outdated
-    if tle_is_outdated(satellite.epochyr, satellite.epochdays):
-        print(f"Skipping outdated satellite: {name}")
-        return None
-
-    positions = []
-    for t in np.linspace(0, time_range, 1000):  # Increase the number of points for smoothness
-        jd, fr = jday(2024, 10, 9, 12, 0, 0 + t)  # Adjust based on time range
-        e, r, v = satellite.sgp4(jd, fr)  # Get position (r) and velocity (v)
-        if e == 0:  # Only add positions if no error occurred
-            positions.append(r)
-        else:
-            print(f"Error {e}: skipping {name}")
-            return None  # Skip this satellite if there's an error
-    return positions
-
-# Function to dynamically adjust axis limits based on data
-def get_dynamic_limits(positions):
-    all_positions = np.concatenate(positions)
-    max_val = np.max(np.abs(all_positions))
-    return [-max_val, max_val]
-
-# Parallel processing for orbit calculations
-def calculate_orbits_parallel(tle_groups, time_range):
-    with ThreadPoolExecutor() as executor:
-        return list(tqdm(executor.map(lambda tle_group: calculate_orbit_positions(tle_group, time_range), tle_groups), total=len(tle_groups)))
-
-# Example usage when fetching TLE data
+# Main code for fetching TLE data and calculating orbits
 tle_urls = {
-    "Last 30 Days' Launches": ('https://celestrak.org/NORAD/elements/gp.php?GROUP=last-30-days&FORMAT=tle', 'tle_data/Last_30_Days\'_Launches.tle'),
+    "Last 30 Days' Launches": ('https://celestrak.org/NORAD/elements/gp.php?GROUP=last-30-days&FORMAT=tle', 'tle_data/Last_30_Days_Launches.tle'),
     "Active Satellites": ('https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle', 'tle_data/Active_Satellites.tle'),
-    "Russian ASAT Test Debris (COSMOS 1408)": ('https://celestrak.org/NORAD/elements/gp.php?GROUP=cosmos-1408-debris&FORMAT=tle', 'tle_data/Russian_ASAT_Test_Debris_(COSMOS_1408).tle'),
-    "Chinese ASAT Test Debris (FENGYUN 1C)": ('https://celestrak.org/NORAD/elements/gp.php?GROUP=fengyun-1c-debris&FORMAT=tle', 'tle_data/Chinese_ASAT_Test_Debris_(FENGYUN_1C).tle'),
-    "IRIDIUM 33 Debris": ('https://celestrak.org/NORAD/elements/gp.php?GROUP=iridium-33-debris&FORMAT=tle', 'tle_data/IRIDIUM_33_Debris.tle'),
-    "COSMOS 2251 Debris": ('https://celestrak.org/NORAD/elements/gp.php?GROUP=cosmos-2251-debris&FORMAT=tle', 'tle_data/COSMOS_2251_Debris.tle')
 }
 
-# Time range for simulation (e.g., 5 days)
-time_range = 86400 * 5
+time_range = 86400 * 5  # 5 days
 
 # Fetch and calculate orbits in parallel
 active_sats_positions = []
 debris_positions = []
 
 for name, (url, local_file_path) in tle_urls.items():
-    tle_groups = fetch_tle_data(url, local_file_path)  # Fetch TLE data for this group
-    positions = calculate_orbits_parallel(tle_groups[:100], time_range)  # Limit to 100 objects per group for faster processing
-    if 'debris' in name.lower():  # Classify debris vs active satellites
+    tle_groups = fetch_tle_data(url, local_file_path)
+    positions = calculate_orbits_parallel(tle_groups[:100], time_range)  # Limit to 100 objects per group
+    if 'debris' in name.lower():
         debris_positions.extend(filter(None, positions))
     else:
         active_sats_positions.extend(filter(None, positions))
 
 # Use the trained PPO model if set to True
-use_model = True  # Set this to False to skip using the model
+use_model = True
 
 if use_model:
-    debris_positions_sample = [np.random.randn(3) * 10000 for _ in range(100)]  # Example debris positions
-    env = SatelliteAvoidanceEnv(debris_positions_sample)  # Create the environment
+    debris_positions_sample = [np.random.randn(3) * 10000 for _ in range(100)]
+    env = SatelliteAvoidanceEnv(debris_positions_sample)
 
-    # Load the saved PPO model
     model = PPO.load("satellite_avoidance_model_ext")
 
-    # Test the model and collect positions for plotting
     model_trajectory = []
-    obs = env.reset()
+    obs = env.reset()  # Here, no info is expected, so only capture obs
     for _ in range(1000):
         action, _states = model.predict(obs)
         obs, reward, done, _ = env.step(action)
-        model_trajectory.append(env.satellite_position.tolist())  # Collect satellite position
+        model_trajectory.append(env.satellite_position.tolist())
         if done:
-            obs = env.reset()
+            obs = env.reset()  # Only reset the observation
+
 else:
     model_trajectory = None
 
-# Example usage when fetching TLE data
-use_dynamic_scaling = True  # Set to True for dynamic orbit plotting, False for full orbits
-
-# Now create the interactive 3D plot using Plotly
 plot_orbits_and_collisions_plotly(
     active_sats_positions,
     debris_positions,
-    model_trajectory=model_trajectory,
-    use_dynamic_scaling=use_dynamic_scaling,  # Control whether to dynamically scale or plot full paths
-    scaling_factor=500  # Adjust this value to fine-tune dynamic scaling
+    model_trajectory=model_trajectory
 )
