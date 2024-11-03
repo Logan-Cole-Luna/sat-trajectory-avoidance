@@ -1,4 +1,4 @@
-# implement_satellite_model.py
+# implement_combined_satellite_model.py
 
 import requests
 import numpy as np
@@ -12,16 +12,27 @@ from astropy import units as u
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 from poliastro.bodies import Earth, Moon
+from astropy.coordinates import get_body_barycentric, solar_system_ephemeris
+from astropy.time import Time
 
+# Constants
 EARTH_RADIUS = Earth.R.to(u.m).value  # Earth's radius in meters
-MOON_RADIUS = Moon.R.to(u.m).value  # Moon's radius in meters
+MOON_RADIUS = Moon.R.to(u.m).value    # Moon's radius in meters
 
+# Use JPL ephemeris for accurate positions
+solar_system_ephemeris.set('de430')
 
 # TLE data URLs and local file paths
 TLE_URLS = {
-    "Last 30 Days' Launches": ('https://celestrak.org/NORAD/elements/gp.php?GROUP=last-30-days&FORMAT=tle', 'tle_data/Last_30_Days_Launches.tle'),
-    "Active Satellites": ('https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle', 'tle_data/Active_Satellites.tle'),
-    "Russian ASAT Test Debris (COSMOS 1408)": ('https://celestrak.org/NORAD/elements/gp.php?GROUP=cosmos-1408-debris&FORMAT=tle', 'tle_data/Russian_ASAT_Test_Debris_(COSMOS_1408).tle')
+    "Last 30 Days' Launches": (
+        'https://celestrak.org/NORAD/elements/gp.php?GROUP=last-30-days&FORMAT=tle',
+        'tle_data/Last_30_Days_Launches.tle'
+    ),
+    "Active Satellites": (
+        'https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle',
+        'tle_data/Active_Satellites.tle'
+    ),
+    # Add more TLE groups as needed
 }
 
 def fetch_tle_data(url, local_file_path):
@@ -60,36 +71,55 @@ def tle_is_outdated(epochyr, epochdays):
     days_old = (datetime.now(timezone.utc) - tle_datetime).days
     return days_old > 30  # Treat as outdated if older than 30 days
 
-# Function to calculate the average distance from Earth for a given set of positions
+def calculate_orbit_positions(tle_group, time_range):
+    """Calculate satellite positions using TLE data."""
+    name, line1, line2 = tle_group
+    satellite = Satrec.twoline2rv(line1, line2)
+
+    # Check if the TLE data is outdated
+    if tle_is_outdated(satellite.epochyr, satellite.epochdays):
+        return None
+
+    positions = []
+    for t in np.linspace(0, time_range, 1000):  # Increase the number of points for smoothness
+        jd, fr = jday(2024, 10, 9, 12, 0, 0 + t)  # Adjust based on time range
+        e, r, v = satellite.sgp4(jd, fr)  # Get position (r) and velocity (v)
+        if e == 0:  # Only add positions if no error occurred
+            positions.append(r)
+        else:
+            return None  # Skip this satellite if there's an error
+    return positions
+
+def calculate_orbits_parallel(tle_groups, time_range):
+    """Parallel processing for orbit calculations."""
+    with ThreadPoolExecutor() as executor:
+        return list(tqdm(executor.map(lambda tle_group: calculate_orbit_positions(tle_group, time_range), tle_groups), total=len(tle_groups)))
+
 def average_distance_from_earth(positions):
     """Calculate the average distance from Earth given a list of 3D positions."""
     earth_center = np.array([0, 0, 0])  # Earth is centered at the origin
     distances = [np.linalg.norm(pos - earth_center) for pos in positions]
     return np.mean(distances)
 
-# Function to scale orbit duration based on inverse distance
 def dynamic_orbit_duration_inverse(distance, min_duration=50, max_duration=500, scaling_factor=5000):
     """Dynamically scale the number of orbit points based on inverse distance from Earth."""
-    # Closer objects get shorter durations, farther objects get longer durations
     if distance < scaling_factor:
         duration = int(max_duration - (distance / scaling_factor) * (max_duration - min_duration))
     else:
         duration = max_duration
     return duration
 
-# Function to create a 3D Earth model with a colorscale (instead of texture)
 def create_earth_model():
-    # Define spherical coordinates for the Earth model
+    """Create a 3D Earth model."""
     u = np.linspace(0, 2 * np.pi, 100)
     v = np.linspace(0, np.pi, 100)
     x = 6371 * np.outer(np.cos(u), np.sin(v))  # Earth radius ~6371 km
     y = 6371 * np.outer(np.sin(u), np.sin(v))
     z = 6371 * np.outer(np.ones(np.size(u)), np.cos(v))
 
-    # Create a surface plot for the Earth model using a predefined colorscale (earth tones)
     earth_model = go.Surface(
         x=x, y=y, z=z,
-        colorscale='earth',  # Use 'earth' colorscale to simulate the Earth texture
+        colorscale='earth',
         cmin=0, cmax=1,
         showscale=False,
         hoverinfo='skip',
@@ -98,12 +128,11 @@ def create_earth_model():
 
     return earth_model
 
-
-# Function to plot orbits and check for collisions with Plotly
-def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_trajectory, use_dynamic_scaling=True, scaling_factor=5000):
+def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_trajectories, use_dynamic_scaling=True, scaling_factor=5000):
+    """Plot orbits and check for collisions with Plotly."""
     fig = go.Figure()
 
-    # Plot smooth trajectories of active satellites (dynamic or full path based on use_dynamic_scaling)
+    # Plot active satellite orbits
     for positions in active_positions:
         if use_dynamic_scaling:
             avg_distance = average_distance_from_earth(positions)
@@ -116,7 +145,7 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_
             x=x_vals, y=y_vals, z=z_vals,
             mode='lines',
             line=dict(color='rgba(0, 0, 255, 0.5)', width=3),
-            name=f'Satellite Orbit'
+            name='Active Satellite Orbit'
         ))
 
         current_pos = positions[0]
@@ -127,7 +156,7 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_
             name='Current Satellite Position'
         ))
 
-    # Plot smooth trajectories of debris
+    # Plot debris orbits
     for positions_debris in debris_positions:
         if use_dynamic_scaling:
             avg_distance = average_distance_from_earth(positions_debris)
@@ -140,7 +169,7 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_
             x=x_vals_debris, y=y_vals_debris, z=z_vals_debris,
             mode='lines',
             line=dict(color='rgba(255, 0, 0, 0.5)', width=1),
-            name=f'Debris Orbit'
+            name='Debris Orbit'
         ))
 
         current_pos_debris = positions_debris[0]
@@ -151,42 +180,25 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_
             name='Current Debris Position'
         ))
 
-    # Plot model satellite path if available
-    if model_trajectory:
-        model_x_vals, model_y_vals, model_z_vals = zip(*model_trajectory)
-        fig.add_trace(go.Scatter3d(
-            x=model_x_vals, y=model_y_vals, z=model_z_vals,
-            mode='lines+markers',
-            line=dict(color='rgba(0, 255, 0, 0.7)', width=5),
-            marker=dict(size=4, color='lime'),
-            name='Model Satellite Path'
-        ))
+    # Plot model satellite trajectories
+    colors = ['lime', 'cyan', 'magenta', 'yellow', 'orange', 'purple', 'pink', 'brown']
+    if model_trajectories:
+        for idx, model_trajectory in enumerate(model_trajectories):
+            model_x_vals, model_y_vals, model_z_vals = zip(*model_trajectory)
+            color = colors[idx % len(colors)]  # Cycle through colors
+            fig.add_trace(go.Scatter3d(
+                x=model_x_vals, y=model_y_vals, z=model_z_vals,
+                mode='lines+markers',
+                line=dict(color=color, width=5),
+                marker=dict(size=4, color=color),
+                name=f'Model Satellite Path {idx+1}'
+            ))
 
-    # Create the Earth model
+    # Create and add Earth model
     earth_model = create_earth_model()
-
-        # Create the Moon model (approximate position and scale)
-    moon_distance = 384400 * 1000  # Average distance to the Moon in meters
-    moon_x = moon_distance / 1000  # Simple placement along x-axis for visualization
-    moon_u = np.linspace(0, 2 * np.pi, 100)
-    moon_v = np.linspace(0, np.pi, 100)
-    moon_x_vals = (MOON_RADIUS / 1000) * np.outer(np.cos(moon_u), np.sin(moon_v)) + moon_x
-    moon_y_vals = (MOON_RADIUS / 1000) * np.outer(np.sin(moon_u), np.sin(moon_v))
-    moon_z_vals = (MOON_RADIUS / 1000) * np.outer(np.ones(np.size(moon_u)), np.cos(moon_v))
-    fig.add_trace(go.Surface(
-        x=moon_x_vals, y=moon_y_vals, z=moon_z_vals,
-        colorscale='gray',
-        cmin=0, cmax=1,
-        showscale=False,
-        opacity=0.9,
-        hoverinfo='skip',
-        name='Moon'
-    ))
-
-    # Add Earth model to the figure
     fig.add_trace(earth_model)
 
-    # Update layout for 3D plot with a space-like background
+    # Update layout
     fig.update_layout(
         scene=dict(
             xaxis=dict(showbackground=False),
@@ -195,11 +207,12 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_
             aspectmode="data",
             bgcolor="black"
         ),
-        title='3D Orbits with Earth and Debris',
+        title='3D Orbits with Earth, Debris, and Model Satellites',
         showlegend=True
     )
 
     fig.show()
+
 
 def plot_orbits_gravitational(active_positions, debris_positions, model_trajectory):
     import plotly.graph_objects as go
@@ -347,116 +360,115 @@ def plot_orbits_gravitational(active_positions, debris_positions, model_trajecto
 
     fig.show()
 
-# Function to calculate satellite positions using TLE data
-def calculate_orbit_positions(tle_group, time_range):
-    name, line1, line2 = tle_group
-    satellite = Satrec.twoline2rv(line1, line2)
 
-    # Check if the TLE data is outdated
-    if tle_is_outdated(satellite.epochyr, satellite.epochdays):
-        print(f"Skipping outdated satellite: {name}")
-        return None
+# Main execution
+if __name__ == '__main__':
+    # Time range for simulation (e.g., 5 days)
+    time_range = 86400 * 5  # 5 days in seconds
 
-    positions = []
-    for t in np.linspace(0, time_range, 1000):  # Increase the number of points for smoothness
-        jd, fr = jday(2024, 10, 9, 12, 0, 0 + t)  # Adjust based on time range
-        e, r, v = satellite.sgp4(jd, fr)  # Get position (r) and velocity (v)
-        if e == 0:  # Only add positions if no error occurred
-            positions.append(r)
+    # Fetch and calculate orbits in parallel
+    active_sats_positions = []
+    debris_positions = []
+
+    for name, (url, local_file_path) in TLE_URLS.items():
+        tle_groups = fetch_tle_data(url, local_file_path)  # Fetch TLE data for this group
+        positions = calculate_orbits_parallel(tle_groups[:100], time_range)  # Limit to 100 objects per group
+        if 'debris' in name.lower():
+            debris_positions.extend(filter(None, positions))
         else:
-            print(f"Error {e}: skipping {name}")
-            return None  # Skip this satellite if there's an error
-    return positions
+            active_sats_positions.extend(filter(None, positions))
 
-# Function to dynamically adjust axis limits based on data
-def get_dynamic_limits(positions):
-    all_positions = np.concatenate(positions)
-    max_val = np.max(np.abs(all_positions))
-    return [-max_val, max_val]
+    # Use the trained PPO model
+    use_model = True
 
-# Parallel processing for orbit calculations
-def calculate_orbits_parallel(tle_groups, time_range):
-    with ThreadPoolExecutor() as executor:
-        return list(tqdm(executor.map(lambda tle_group: calculate_orbit_positions(tle_group, time_range), tle_groups), total=len(tle_groups)))
+    # Create multiple environments for different satellites with unique heights and rotation angles
+    satellite_configs = [
+        {'distance': 700e3, 'angle': 45},
+        {'distance': 1000e3, 'angle': 30},
+        {'distance': 600e3, 'angle': 60},
+    ]
 
-
-# Example usage when fetching TLE data
-tle_urls = {
-    "Last 30 Days' Launches": ('https://celestrak.org/NORAD/elements/gp.php?GROUP=last-30-days&FORMAT=tle', 'tle_data/Last_30_Days_Launches.tle'),
-    "Active Satellites": ('https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle', 'tle_data/Active_Satellites.tle'),
-    "Russian ASAT Test Debris (COSMOS 1408)": ('https://celestrak.org/NORAD/elements/gp.php?GROUP=cosmos-1408-debris&FORMAT=tle', 'tle_data/Russian_ASAT_Test_Debris_(COSMOS_1408).tle'),
-    "Chinese ASAT Test Debris (FENGYUN 1C)": ('https://celestrak.org/NORAD/elements/gp.php?GROUP=fengyun-1c-debris&FORMAT=tle', 'tle_data/Chinese_ASAT_Test_Debris_(FENGYUN_1C).tle'),
-    "IRIDIUM 33 Debris": ('https://celestrak.org/NORAD/elements/gp.php?GROUP=iridium-33-debris&FORMAT=tle', 'tle_data/IRIDIUM_33_Debris.tle'),
-    "COSMOS 2251 Debris": ('https://celestrak.org/NORAD/elements/gp.php?GROUP=cosmos-2251-debris&FORMAT=tle', 'tle_data/COSMOS_2251_Debris.tle')
-}
-
-# Time range for simulation (e.g., 5 days)
-time_range = 86400 * 5
-
-# Fetch and calculate orbits in parallel
-active_sats_positions = []
-debris_positions = []
-
-for name, (url, local_file_path) in tle_urls.items():
-    tle_groups = fetch_tle_data(url, local_file_path)  # Fetch TLE data for this group
-    positions = calculate_orbits_parallel(tle_groups[:100], time_range)  # Limit to 100 objects per group
-    if 'debris' in name.lower():
-        debris_positions.extend(filter(None, positions))
-    else:
-        active_sats_positions.extend(filter(None, positions))
-
-# Use the trained PPO model if set to True
-use_model = True
-
-if use_model:
-    debris_positions_sample = [np.random.randn(3) * 10000 for _ in range(100)]
-    env = SatelliteAvoidanceEnv(debris_positions_sample, satellite_distance=100000000e3)
+    environments = []
+    for config in satellite_configs:
+        # For each satellite, we can use real debris positions from TLE data
+        debris_positions_sample = [np.array(pos) for pos in debris_positions[:100]]
+        env = SatelliteAvoidanceEnv(
+            debris_positions=debris_positions_sample,
+            satellite_distance=config['distance'],
+            init_angle=config['angle'],
+            collision_course=False  # Set to True if you want to initialize on a collision course
+        )
+        environments.append(env)
 
     # Load the saved PPO model
-    model = PPO.load("satellite_avoidance_model_advanced")
+    model = PPO.load("satellite_avoidance_model_combined")
 
-    # Test the model and collect positions for plotting
-    model_trajectory = []
-    obs, _ = env.reset()  # Here, no info is expected, so only capture obs
-    for _ in range(1000):
-        action, _states = model.predict(obs)
-        obs, reward, done, truncated, _ = env.step(action)
-        model_trajectory.append(env.satellite_position.tolist())
-        if done:
-            print("[DEBUG] Episode finished, resetting environment.")
-            obs, _ = env.reset()
-else:
-    model_trajectory = None
+    # Initialize lists to store data for plotting and metrics
+    all_model_trajectories = []
+    performance_metrics = []  # List to store performance metrics for each satellite
 
-# Check if a collision was detected or if the satellite avoided it successfully
-collision_avoided = all(np.linalg.norm(env.satellite_position - debris) >= 10e3 for debris in env.debris_positions)
+    num_steps = 1000  # Number of steps to simulate
 
-if collision_avoided:
-    print("Satellite avoided all collisions.")
-else:
-    print("Satellite was on route to collide, collision detected.")
+    # Test the model for each environment and collect positions for plotting
+    for i, env in enumerate(environments):
+        model_trajectory = []
+        actions = []
+        collision_occurred = False
+        min_distance_to_debris = float('inf')
+        obs, _ = env.reset()
+        cumulative_reward = 0
 
+        for _ in range(num_steps):
+            action, _states = model.predict(obs)
+            actions.append(action)
+            obs, reward, done, truncated, info = env.step(action)
+            if 'collision_occurred' in info and info['collision_occurred']:
+                collision_occurred = True
+            model_trajectory.append((env.satellite_position / 1000).tolist())  # Convert to km
+            # Calculate distance to nearest debris
+            distances = [np.linalg.norm(env.satellite_position - debris) for debris in env.debris_positions]
+            min_distance = min(distances)
+            if min_distance < min_distance_to_debris:
+                min_distance_to_debris = min_distance
+            cumulative_reward += reward
+            if done:
+                break  # Exit the loop if done
 
-# Example usage when fetching TLE data
-use_dynamic_scaling = True  # Set to True for dynamic orbit plotting, False for full orbits
+        # Store the model trajectory
+        all_model_trajectories.append(model_trajectory)
 
-# Convert model trajectory positions from meters to kilometers
-model_trajectory_km = [(np.array(pos) / 1000).tolist() for pos in model_trajectory]
+        # Compute performance metrics
+        num_steps_taken = len(actions)
+        total_delta_v = sum(np.linalg.norm(a) for a in actions)
 
-plot_orbits_gravitational(
-    active_sats_positions,
-    debris_positions,
-    model_trajectory=model_trajectory_km
-)
+        # Store performance metrics
+        metrics = {
+            'satellite_id': i + 1,
+            'num_steps_taken': num_steps_taken,
+            'total_delta_v': total_delta_v,
+            'cumulative_reward': cumulative_reward,
+            'collision_occurred': collision_occurred,
+            'min_distance_to_debris': min_distance_to_debris
+        }
+        performance_metrics.append(metrics)
 
-# Now create the interactive 3D plot using Plotly
-plot_orbits_and_collisions_plotly(
-    active_sats_positions,
-    debris_positions,
-    model_trajectory=model_trajectory_km,
-    use_dynamic_scaling=use_dynamic_scaling,  # Control whether to dynamically scale or plot full paths
-    scaling_factor=500  # Adjust this value to fine-tune dynamic scaling
-)
+        # Print out performance metrics
+        print(f"Satellite {i + 1} Performance Metrics:")
+        print(f"  Total steps taken: {num_steps_taken}")
+        print(f"  Total delta-v used: {total_delta_v:.4f} m/s")
+        print(f"  Total cumulative reward: {cumulative_reward:.4f}")
+        print(f"  Collision occurred: {collision_occurred}")
+        print(f"  Minimum distance to debris: {min_distance_to_debris:.2f} meters")
+        print()
 
+    # Use dynamic scaling for plotting
+    use_dynamic_scaling = True  # Set to True for dynamic orbit plotting, False for full orbits
 
-
+    # Create the interactive 3D plot using Plotly for all satellites
+    plot_orbits_and_collisions_plotly(
+        active_positions=active_sats_positions,
+        debris_positions=debris_positions,
+        model_trajectories=all_model_trajectories,
+        use_dynamic_scaling=use_dynamic_scaling,
+        scaling_factor=500
+    )
