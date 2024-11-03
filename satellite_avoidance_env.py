@@ -4,18 +4,20 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 from astropy import units as u
-from poliastro.bodies import Earth, Moon, Sun
+from poliastro.bodies import Earth
 from poliastro.twobody import Orbit
 from astropy.time import Time
-from poliastro.ephem import build_ephem_interpolant
 from astropy.constants import G
+from astropy.coordinates import get_body_barycentric
+from astropy.coordinates import solar_system_ephemeris
+
+# Use JPL ephemeris for better accuracy
+solar_system_ephemeris.set('de430')
 
 # Constants for orbit and gravitational forces
 G_const = G.value  # Gravitational constant in m^3 kg^−1 s^−2
 M_EARTH = Earth.mass.to(u.kg).value  # Mass of Earth in kg
 EARTH_RADIUS = Earth.R.to(u.m).value  # Earth's radius in meters
-M_MOON = Moon.mass.to(u.kg).value  # Mass of Moon in kg
-M_SUN = Sun.mass.to(u.kg).value  # Mass of Sun in kg
 
 class SatelliteAvoidanceEnv(gym.Env):
     def __init__(self, debris_positions, max_debris=100, satellite_distance=700e3):
@@ -43,14 +45,6 @@ class SatelliteAvoidanceEnv(gym.Env):
 
         # Debris initialization
         self.debris_positions = [np.array(debris, dtype=np.float64) for debris in debris_positions]
-
-        # Ephemeris for Moon and Sun
-        self.ephem_moon = build_ephem_interpolant(
-            Moon, 28 * u.day, (self.current_time, self.current_time + 28 * u.day), rtol=1e-2
-        )
-        self.ephem_sun = build_ephem_interpolant(
-            Sun, 365 * u.day, (self.current_time, self.current_time + 365 * u.day), rtol=1e-2
-        )
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -86,17 +80,23 @@ class SatelliteAvoidanceEnv(gym.Env):
         r_norm = np.linalg.norm(r_vec)
         a_earth = -G_const * M_EARTH * r_vec / r_norm**3
 
-        moon_pos = np.asarray(self.ephem_moon(self.current_time).get_xyz().to(u.m).value.flatten(), dtype=np.float64)
+        # Get Moon's position in Earth-centered frame
+        moon_pos = get_body_barycentric('moon', self.current_time).get_xyz().to(u.m).value.flatten()
+        earth_pos = get_body_barycentric('earth', self.current_time).get_xyz().to(u.m).value.flatten()
+        moon_pos_earth_centered = moon_pos - earth_pos
 
-        print("Moon Position Type:", type(moon_pos), "Values:", moon_pos)
-
-        r_moon = moon_pos - self.satellite_position
+        r_moon = moon_pos_earth_centered - self.satellite_position
         r_moon_norm = np.linalg.norm(r_moon)
+        M_MOON = 7.34767309e22  # Mass of Moon in kg
         a_moon = G_const * M_MOON * r_moon / r_moon_norm**3
 
-        sun_pos = self.ephem_sun(self.current_time).get_xyz().to(u.m).value.flatten()
-        r_sun = sun_pos - self.satellite_position
+        # Get Sun's position in Earth-centered frame
+        sun_pos = get_body_barycentric('sun', self.current_time).get_xyz().to(u.m).value.flatten()
+        sun_pos_earth_centered = sun_pos - earth_pos
+
+        r_sun = sun_pos_earth_centered - self.satellite_position
         r_sun_norm = np.linalg.norm(r_sun)
+        M_SUN = 1.98847e30  # Mass of Sun in kg
         a_sun = G_const * M_SUN * r_sun / r_sun_norm**3
 
         a_total = a_earth + a_moon + a_sun
@@ -110,7 +110,10 @@ class SatelliteAvoidanceEnv(gym.Env):
         specific_impulse = 300.0  # s
         g0 = 9.80665  # m/s^2
         delta_v = np.linalg.norm(thrust_acceleration * self.time_step)
-        fuel_consumed = self.satellite_mass * (1 - np.exp(-delta_v / (specific_impulse * g0)))
+        if delta_v > 0:
+            fuel_consumed = self.satellite_mass * (1 - np.exp(-delta_v / (specific_impulse * g0)))
+        else:
+            fuel_consumed = 0.0
 
         self.fuel_mass -= fuel_consumed
         self.satellite_mass -= fuel_consumed
@@ -179,4 +182,3 @@ class SatelliteAvoidanceEnv(gym.Env):
         print(f"Position (m): {self.satellite_position}")
         print(f"Velocity (m/s): {self.satellite_velocity}")
         print(f"Fuel Mass (kg): {self.fuel_mass}")
-
