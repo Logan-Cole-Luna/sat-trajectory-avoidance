@@ -1,0 +1,8 @@
+{
+    "collision_rate": 97.0,
+    "average_cumulative_reward": -19525467.06192228,
+    "average_steps_taken": 527.7,
+    "average_delta_v_used_m_s": 130.80881073661934,
+    "average_min_distance_to_debris_meters": 105104.13718750501,
+    "average_fuel_consumed_kg": 2.4363477066555044
+}

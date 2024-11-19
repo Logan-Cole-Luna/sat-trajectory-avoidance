@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 from stable_baselines3 import PPO
 from sgp4.api import Satrec, jday
 import plotly.graph_objects as go
-from satellite_avoidance_env import SatelliteAvoidanceEnv
+from eval.satellite_avoidance_env import SatelliteAvoidanceEnv
 from astropy.constants import G
 from astropy import units as u
 from tqdm import tqdm
@@ -128,6 +128,27 @@ def create_earth_model():
 
     return earth_model
 
+def create_moon_model():
+    # Create the Moon model (approximate position and scale)
+    moon_distance = 384400 * 1000  # Average distance to the Moon in meters
+    moon_x = moon_distance / 1000  # Simple placement along x-axis for visualization
+    moon_u = np.linspace(0, 2 * np.pi, 100)
+    moon_v = np.linspace(0, np.pi, 100)
+    moon_x_vals = (MOON_RADIUS / 1000) * np.outer(np.cos(moon_u), np.sin(moon_v)) + moon_x
+    moon_y_vals = (MOON_RADIUS / 1000) * np.outer(np.sin(moon_u), np.sin(moon_v))
+    moon_z_vals = (MOON_RADIUS / 1000) * np.outer(np.ones(np.size(moon_u)), np.cos(moon_v))
+    moon_model = go.Surface(
+        x=moon_x_vals, y=moon_y_vals, z=moon_z_vals,
+        colorscale='gray',
+        cmin=0, cmax=1,
+        showscale=False,
+        opacity=0.9,
+        hoverinfo='skip',
+        name='Moon'
+    )
+
+    return moon_model
+
 def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_trajectories, use_dynamic_scaling=True, scaling_factor=5000):
     """Plot orbits and check for collisions with Plotly."""
     fig = go.Figure()
@@ -138,14 +159,25 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_
             avg_distance = average_distance_from_earth(positions)
             orbit_duration = dynamic_orbit_duration_inverse(avg_distance, scaling_factor=scaling_factor)
             x_vals, y_vals, z_vals = zip(*positions[:orbit_duration])
+            
+            # Adjust point size based on distance from Earth
+            sizes = [(np.linalg.norm([x, y, z]) / EARTH_RADIUS) * 2 for x, y, z in zip(x_vals, y_vals, z_vals)]
         else:
             x_vals, y_vals, z_vals = zip(*positions)
+            sizes = [2] * len(x_vals)  # Default size if dynamic scaling is not used
             
         fig.add_trace(go.Scatter3d(
             x=x_vals, y=y_vals, z=z_vals,
             mode='lines',
             line=dict(color='rgba(0, 0, 255, 0.5)', width=3),
             name='Active Satellite Orbit'
+        ))
+
+        fig.add_trace(go.Scatter3d(
+            x=x_vals, y=y_vals, z=z_vals,
+            mode='markers',
+            marker=dict(size=sizes, color='cyan', opacity=0.8),
+            name='Orbit Points (Scaled)'
         ))
 
         current_pos = positions[0]
@@ -164,7 +196,7 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_
             x_vals_debris, y_vals_debris, z_vals_debris = zip(*positions_debris[:orbit_duration])
         else:
             x_vals_debris, y_vals_debris, z_vals_debris = zip(*positions_debris)
-        
+            
         fig.add_trace(go.Scatter3d(
             x=x_vals_debris, y=y_vals_debris, z=z_vals_debris,
             mode='lines',
@@ -194,9 +226,12 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_
                 name=f'Model Satellite Path {idx+1}'
             ))
 
-    # Create and add Earth model
+    # Create and add Earth & Moon models
     earth_model = create_earth_model()
     fig.add_trace(earth_model)
+
+    moon_model = create_moon_model()
+    fig.add_trace(moon_model)
 
     # Update layout
     fig.update_layout(
@@ -384,8 +419,8 @@ if __name__ == '__main__':
     # Create multiple environments for different satellites with unique heights and rotation angles
     satellite_configs = [
         {'distance': 700e3, 'angle': 45},
-        {'distance': 1000e3, 'angle': 30},
-        {'distance': 600e3, 'angle': 60},
+        {'distance': 10000e3, 'angle': 30},
+        {'distance': 60000e3, 'angle': 60},
     ]
 
     environments = []
@@ -396,7 +431,7 @@ if __name__ == '__main__':
             debris_positions=debris_positions_sample,
             satellite_distance=config['distance'],
             init_angle=config['angle'],
-            collision_course=False  # Set to True if you want to initialize on a collision course
+            collision_course=True  # Set to True if you want to initialize on a collision course
         )
         environments.append(env)
 
@@ -470,5 +505,5 @@ if __name__ == '__main__':
         debris_positions=debris_positions,
         model_trajectories=all_model_trajectories,
         use_dynamic_scaling=use_dynamic_scaling,
-        scaling_factor=500
+        scaling_factor=50000
     )
