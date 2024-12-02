@@ -1,0 +1,2 @@
+Everything in this folder is older work for this project that I likely used
+for the main files or for visual generation, so I would recommend to ignore these.

@@ -470,7 +470,7 @@ for config in satellite_configs:
     environments.append(env)
 
 # Load the saved PPO model
-model = PPO.load("satellite_avoidance_model_ext_best")
+model = PPO.load("models/satellite_avoidance_model_ext_best")
 
 # Initialize lists to store data for alternative visualizations and metrics
 all_model_trajectories = []
@@ -640,3 +640,116 @@ ax.set_title('3D Orbits of Satellites')
 ax.legend()
 plt.show()
 '''
+
+def plot_orbits_and_collisions_plotly_animated(active_positions, debris_positions, model_trajectories, num_steps=100):
+    """Create an animated 3D plot of active satellites, debris, and model predictions."""
+    fig = go.Figure()
+
+    # Initialize traces for Earth
+    earth_model = create_earth_model()
+    fig.add_trace(earth_model)
+
+    # Initialize traces for Moon if needed
+    # moon_model = create_moon_model()
+    # fig.add_trace(moon_model)
+
+    # Initialize satellite traces
+    satellite_traces = []
+    for i, positions in enumerate(active_positions):
+        trace = go.Scatter3d(
+            x=[positions[0][0]], y=[positions[0][1]], z=[positions[0][2]],
+            mode='markers',
+            marker=dict(size=6, color='cyan'),
+            name=f'Active Satellite {i+1}'
+        )
+        satellite_traces.append(trace)
+        fig.add_trace(trace)
+
+    # Initialize debris traces
+    debris_traces = []
+    for i, debris in enumerate(debris_positions):
+        trace = go.Scatter3d(
+            x=[debris[0][0]], y=[debris[0][1]], z=[debris[0][2]],
+            mode='markers',
+            marker=dict(size=4, color='yellow'),
+            name=f'Debris {i+1}'
+        )
+        debris_traces.append(trace)
+        fig.add_trace(trace)
+
+    # Initialize model prediction traces
+    model_traces = []
+    for i, model_trajectory in enumerate(model_trajectories):
+        trace = go.Scatter3d(
+            x=[model_trajectory[0][0]], y=[model_trajectory[0][1]], z=[model_trajectory[0][2]],
+            mode='markers',
+            marker=dict(size=6, color='magenta'),
+            name=f'Model Satellite {i+1}'
+        )
+        model_traces.append(trace)
+        fig.add_trace(trace)
+
+    frames = []
+    for step in range(1, num_steps):
+        frame_data = []
+        for i, positions in enumerate(active_positions):
+            frame_data.append(go.Scatter3d(
+                x=[positions[step][0]],
+                y=[positions[step][1]],
+                z=[positions[step][2]],
+                mode='markers',
+                marker=dict(size=6, color='cyan'),
+                name=f'Active Satellite {i+1}'
+            ))
+        for i, debris in enumerate(debris_positions):
+            frame_data.append(go.Scatter3d(
+                x=[debris[step][0]],
+                y=[debris[step][1]],
+                z=[debris[step][2]],
+                mode='markers',
+                marker=dict(size=4, color='yellow'),
+                name=f'Debris {i+1}'
+            ))
+        for i, model_trajectory in enumerate(model_traces):
+            frame_data.append(go.Scatter3d(
+                x=[model_trajectories[i][step][0]],
+                y=[model_trajectories[i][step][1]],
+                z=[model_trajectories[i][step][2]],
+                mode='markers',
+                marker=dict(size=6, color='magenta'),
+                name=f'Model Satellite {i+1}'
+            ))
+        frames.append(go.Frame(data=frame_data, name=str(step)))
+
+    fig.frames = frames
+
+    fig.update_layout(
+        updatemenus=[dict(
+            type='buttons',
+            showactive=False,
+            buttons=[dict(label='Play',
+                          method='animate',
+                          args=[None, {"frame": {"duration": 50, "redraw": True},
+                                       "fromcurrent": True, "transition": {"duration": 0}}])]
+        )],
+        scene=dict(
+            xaxis=dict(range=[-10000, 10000], backgroundcolor="black"),
+            yaxis=dict(range=[-10000, 10000], backgroundcolor="black"),
+            zaxis=dict(range=[-10000, 10000], backgroundcolor="black"),
+            aspectmode='data'
+        ),
+        title='Animated 3D Orbits: Active Satellites, Debris, and Model Predictions',
+        showlegend=True
+    )
+
+    fig.show()
+
+# After collecting all_model_trajectories and other data
+
+# Create the animated plot
+plot_orbits_and_collisions_plotly_animated(
+    active_positions=all_satellite_positions,
+    debris_positions=all_debris_positions,
+    model_trajectories=all_model_trajectories,
+    num_steps=100  # Adjust based on simulation steps
+)
