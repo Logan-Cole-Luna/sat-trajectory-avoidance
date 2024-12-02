@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 from stable_baselines3 import PPO
 from sgp4.api import Satrec, jday
 import plotly.graph_objects as go
-from eval.satellite_avoidance_env import SatelliteAvoidanceEnv
+from utils.eval.satellite_avoidance_env import SatelliteAvoidanceEnv
 from astropy.constants import G
 from astropy import units as u
 from tqdm import tqdm

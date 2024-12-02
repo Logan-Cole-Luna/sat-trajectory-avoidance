@@ -13,6 +13,24 @@ This project implements an AI-powered satellite trajectory projection and collis
 - **Gravitational Influence Modeling**: Accounts for Earth's and Moon's gravitational effects on satellite orbits.
 - **Performance Metrics Tracking**: Logs and analyzes performance metrics during simulations.
 
+<img src="images/CorrectOrbit.png" alt="Correct Orbit" width="300" />
+<img src="images/System_overview.png" alt="Correct Orbit" width="300" />
+<img src="images/poster.png" alt="Correct Orbit" width="600" />
+
+## Demo
+
+### Animation
+[View Animation](misc/gen_media/animation.html)
+<iframe src="misc/gen_media/animation.html" width="600" height="400" title="Animation"></iframe>
+
+### Video Demonstration
+![Demo Video](misc/gen_media/animation.mp4)
+
+<video width="600" controls>
+  <source src="misc/gen_media/animation.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+
 ## Prerequisites
 
 - **Python 3.8+**
@@ -33,16 +51,21 @@ This project implements an AI-powered satellite trajectory projection and collis
 
 ## Usage
 
+### Download TLE Data from CelesTrack
+```bash
+python tle_export.py
+```
+
 ### Implement and Run the pretrained Satellite Model
 
 ```bash
-python implement_satellite_model.py
+python implement_sat.py
 ```
 
 ### Train Your Own Satellite Model
 
 ```bash
-python train_satellite_model.py
+python train_sat.py
 ```
 
 ## Data
@@ -50,12 +73,3 @@ The project uses TLE data from CelesTrak, stored in the tle_data/ directory. Ens
 
 ## Performance Metrics
 Performance metrics such as collision counts, reward accumulation, delta-v usage, and minimum distances to debris are logged and can be reviewed to evaluate the model's effectiveness.
-
-## Demo
-
-### Animation
-[View Animation](misc/gen_media/animation.html)
-
-### Video Demonstration
-![Demo Video](misc/gen_media/animation.mp4)
-

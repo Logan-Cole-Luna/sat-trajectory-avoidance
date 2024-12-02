@@ -402,8 +402,8 @@ class MetricsCallback(BaseCallback):
 
 if __name__ == '__main__':
     # Create directories for logs and models
-    log_dir = "logs/"
-    model_dir = "models/"
+    log_dir = "results/logs/"
+    model_dir = "models/train/"
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(model_dir, exist_ok=True)
     os.makedirs(f"{model_dir}/best_model", exist_ok=True)
