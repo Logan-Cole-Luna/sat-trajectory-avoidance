@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 from stable_baselines3 import PPO
 from sgp4.api import Satrec, jday
 import plotly.graph_objects as go
-from eval.satellite_avoidance_env import SatelliteAvoidanceEnv
+from utils.eval.satellite_avoidance_env import SatelliteAvoidanceEnv
 from astropy.constants import G
 from astropy import units as u
 from tqdm import tqdm
@@ -25,24 +25,10 @@ TLE_URLS = {
 }
 
 def fetch_tle_data(url, local_file_path):
-    """Fetch TLE data from a URL or fallback to a local file."""
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            tle_data = response.text.splitlines()
-            return [tle_data[i:i + 3] for i in range(0, len(tle_data), 3)]  # Group into (Name, Line1, Line2)
-        else:
-            print(f"Error fetching TLE data: {response.status_code}, switching to local file.")
-    except Exception as e:
-        print(f"Error fetching TLE data from URL: {e}, switching to local file.")
-
-    # Fallback to local file if fetching fails
-    try:
-        with open(local_file_path, 'r') as file:
-            tle_data = file.read().splitlines()
-            return [tle_data[i:i + 3] for i in range(0, len(tle_data), 3)]  # Group into (Name, Line1, Line2)
-    except Exception as e:
-        raise Exception(f"Error reading local TLE file '{local_file_path}': {e}")
+    # Use only local file
+    with open(local_file_path, 'r') as file:
+        tle_data = file.read().splitlines()
+        return [tle_data[i:i + 3] for i in range(0, len(tle_data), 3)]
 
 def convert_epoch_to_datetime(epochyr, epochdays):
     """Convert epoch year and days to a timezone-aware datetime object."""
@@ -348,6 +334,8 @@ def plot_orbits_gravitational(active_positions, debris_positions, model_trajecto
     fig.show()
 
 # Function to calculate satellite positions using TLE data
+MAX_DISTANCE = 3e5  # Maximum allowed distance from Earth in meters
+
 def calculate_orbit_positions(tle_group, time_range):
     name, line1, line2 = tle_group
     satellite = Satrec.twoline2rv(line1, line2)
@@ -362,7 +350,9 @@ def calculate_orbit_positions(tle_group, time_range):
         jd, fr = jday(2024, 10, 9, 12, 0, 0 + t)  # Adjust based on time range
         e, r, v = satellite.sgp4(jd, fr)  # Get position (r) and velocity (v)
         if e == 0:  # Only add positions if no error occurred
-            positions.append(r)
+            distance = np.linalg.norm(r)
+            if distance <= MAX_DISTANCE:
+                positions.append(r)
         else:
             print(f"Error {e}: skipping {name}")
             return None  # Skip this satellite if there's an error
@@ -413,7 +403,7 @@ if use_model:
     env = SatelliteAvoidanceEnv(debris_positions_sample, satellite_distance=100000000e3)
 
     # Load the saved PPO model
-    model = PPO.load("satellite_avoidance_model_advanced")
+    model = PPO.load("models/satellite_avoidance_model_advanced")
 
     # Test the model and collect positions for plotting
     model_trajectory = []

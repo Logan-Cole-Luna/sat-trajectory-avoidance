@@ -276,23 +276,10 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_
 
 # Function to fetch TLE data from a URL or fallback to a local file
 def fetch_tle_data(url, local_file_path):
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            tle_data = response.text.splitlines()
-            return [tle_data[i:i+3] for i in range(0, len(tle_data), 3)]  # Group into 3 (Name, Line1, Line2)
-        else:
-            print(f"Error fetching TLE data: {response.status_code}, switching to local file.")
-    except Exception as e:
-        print(f"Error fetching TLE data from URL: {e}, switching to local file.")
-
-    # Fallback to local file if fetching fails
-    try:
-        with open(local_file_path, 'r') as file:
-            tle_data = file.read().splitlines()
-            return [tle_data[i:i+3] for i in range(0, len(tle_data), 3)]  # Group into 3 (Name, Line1, Line2)
-    except Exception as e:
-        raise Exception(f"Error reading local TLE file '{local_file_path}': {e}")
+    # Use only local file
+    with open(local_file_path, 'r') as file:
+        tle_data = file.read().splitlines()
+        return [tle_data[i:i + 3] for i in range(0, len(tle_data), 3)]
 
 # Convert epoch year and days to a timezone-aware datetime object
 def convert_epoch_to_datetime(epochyr, epochdays):
@@ -311,6 +298,8 @@ def tle_is_outdated(epochyr, epochdays):
     return days_old > 30  # Example: treat as outdated if older than 30 days
 
 # Function to calculate satellite positions using TLE data
+MAX_DISTANCE = 2e5  # Maximum allowed distance from Earth in meters (300,000m)
+
 def calculate_orbit_positions(tle_group, time_range):
     name, line1, line2 = tle_group
     satellite = Satrec.twoline2rv(line1, line2)
@@ -320,12 +309,15 @@ def calculate_orbit_positions(tle_group, time_range):
         return None
 
     positions = []
-    for t in np.linspace(0, time_range, 1000):  # Increase the number of points for smoothness
+    for t in np.linspace(0, time_range, 1000):        
         jd, fr = jday(2024, 10, 9, 12, 0, 0 + t)  # Adjust based on time range
         e, r, v = satellite.sgp4(jd, fr)  # Get position (r) and velocity (v)
         if e == 0:  # Only add positions if no error occurred
-            positions.append(r)
+            distance = np.linalg.norm(r)
+            if distance <= MAX_DISTANCE:
+                positions.append(r)
         else:
+            print(f"Error {e}: skipping {name}")
             return None  # Skip this satellite if there's an error
     return positions
 
@@ -371,16 +363,16 @@ satellite_configs = [
 
 environments = []
 for config in satellite_configs:
-    debris_positions_sample = [np.random.randn(3) * 10000 for _ in range(100)]
+    # Use actual debris positions instead of random ones
     env = SatelliteAvoidanceEnv(
-        debris_positions_sample, 
+        debris_positions=debris_positions[:100],  # Use real debris data
         satellite_distance=config['distance'], 
         init_angle=config['angle'], 
         collision_course=False)
     environments.append(env)
 
 # Load the saved PPO model
-model = PPO.load("satellite_avoidance_model_ext_best")
+model = PPO.load("models/satellite_avoidance_model_ext_best")
 
 # Initialize lists to store data for alternative visualizations and metrics
 all_model_trajectories = []
@@ -474,6 +466,7 @@ plot_orbits_and_collisions_plotly(
     scaling_factor=500  # Adjust this value to fine-tune dynamic scaling
 )
 
+'''
 # Alternative Visualizations
 
 # Plot distance to nearest debris over time for each satellite
@@ -530,3 +523,5 @@ for i, positions in enumerate(all_satellite_positions):
     plt.axis('equal')
     plt.grid(True)
     plt.show()
+    
+'''

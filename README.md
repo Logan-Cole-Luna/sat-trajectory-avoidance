@@ -50,3 +50,12 @@ The project uses TLE data from CelesTrak, stored in the tle_data/ directory. Ens
 
 ## Performance Metrics
 Performance metrics such as collision counts, reward accumulation, delta-v usage, and minimum distances to debris are logged and can be reviewed to evaluate the model's effectiveness.
+
+## Demo
+
+### Animation
+[View Animation](misc/gen_media/animation.html)
+
+### Video Demonstration
+![Demo Video](misc/gen_media/animation.html)
+

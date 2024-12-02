@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 from stable_baselines3 import PPO
 from sgp4.api import Satrec, jday
 import plotly.graph_objects as go
-from eval.satellite_avoidance_env import SatelliteAvoidanceEnv
+from utils.eval.satellite_avoidance_env import SatelliteAvoidanceEnv
 from astropy.constants import G
 from astropy import units as u
 from tqdm import tqdm
@@ -24,36 +24,19 @@ solar_system_ephemeris.set('de430')
 
 # TLE data URLs and local file paths
 TLE_URLS = {
-    "Last 30 Days' Launches": (
-        'https://celestrak.org/NORAD/elements/gp.php?GROUP=last-30-days&FORMAT=tle',
-        'tle_data/Last_30_Days_Launches.tle'
-    ),
-    "Active Satellites": (
-        'https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle',
-        'tle_data/Active_Satellites.tle'
-    ),
-    # Add more TLE groups as needed
+    "Last 30 Days' Launches": 'tle_data/Last_30_Days_Launches.tle',
+    "Active Satellites": 'tle_data/Active_Satellites.tle',
+    "Russian ASAT Test Debris (COSMOS 1408)": 'tle_data/Russian_ASAT_Test_Debris_(COSMOS_1408).tle',
+    "Chinese ASAT Test Debris (FENGYUN 1C)": 'tle_data/Chinese_ASAT_Test_Debris_(FENGYUN_1C).tle',
+    "IRIDIUM 33 Debris": 'tle_data/IRIDIUM_33_Debris.tle',
+    "COSMOS 2251 Debris": 'tle_data/COSMOS_2251_Debris.tle'
 }
 
-def fetch_tle_data(url, local_file_path):
-    """Fetch TLE data from a URL or fallback to a local file."""
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            tle_data = response.text.splitlines()
-            return [tle_data[i:i + 3] for i in range(0, len(tle_data), 3)]  # Group into (Name, Line1, Line2)
-        else:
-            print(f"Error fetching TLE data: {response.status_code}, switching to local file.")
-    except Exception as e:
-        print(f"Error fetching TLE data from URL: {e}, switching to local file.")
-
-    # Fallback to local file if fetching fails
-    try:
-        with open(local_file_path, 'r') as file:
-            tle_data = file.read().splitlines()
-            return [tle_data[i:i + 3] for i in range(0, len(tle_data), 3)]  # Group into (Name, Line1, Line2)
-    except Exception as e:
-        raise Exception(f"Error reading local TLE file '{local_file_path}': {e}")
+def fetch_tle_data(local_file_path):
+    """Load TLE data from local file."""
+    with open(local_file_path, 'r') as file:
+        tle_data = file.read().splitlines()
+        return [tle_data[i:i + 3] for i in range(0, len(tle_data), 3)]
 
 def convert_epoch_to_datetime(epochyr, epochdays):
     """Convert epoch year and days to a timezone-aware datetime object."""
@@ -71,6 +54,9 @@ def tle_is_outdated(epochyr, epochdays):
     days_old = (datetime.now(timezone.utc) - tle_datetime).days
     return days_old > 30  # Treat as outdated if older than 30 days
 
+# Add constant before calculate_orbit_positions function
+MAX_DISTANCE = 3e5  # Maximum allowed distance from Earth in meters (300,000m)
+
 def calculate_orbit_positions(tle_group, time_range):
     """Calculate satellite positions using TLE data."""
     name, line1, line2 = tle_group
@@ -85,7 +71,9 @@ def calculate_orbit_positions(tle_group, time_range):
         jd, fr = jday(2024, 10, 9, 12, 0, 0 + t)  # Adjust based on time range
         e, r, v = satellite.sgp4(jd, fr)  # Get position (r) and velocity (v)
         if e == 0:  # Only add positions if no error occurred
-            positions.append(r)
+            distance = np.linalg.norm(r)
+            if distance <= MAX_DISTANCE:  # Add distance check
+                positions.append(r)
         else:
             return None  # Skip this satellite if there's an error
     return positions
@@ -405,8 +393,8 @@ if __name__ == '__main__':
     active_sats_positions = []
     debris_positions = []
 
-    for name, (url, local_file_path) in TLE_URLS.items():
-        tle_groups = fetch_tle_data(url, local_file_path)  # Fetch TLE data for this group
+    for name, local_file_path in TLE_URLS.items():
+        tle_groups = fetch_tle_data(local_file_path)  # Load TLE data from file
         positions = calculate_orbits_parallel(tle_groups[:100], time_range)  # Limit to 100 objects per group
         if 'debris' in name.lower():
             debris_positions.extend(filter(None, positions))
@@ -425,18 +413,17 @@ if __name__ == '__main__':
 
     environments = []
     for config in satellite_configs:
-        # For each satellite, we can use real debris positions from TLE data
-        debris_positions_sample = [np.array(pos) for pos in debris_positions[:100]]
+        # Remove random debris generation and use actual TLE debris data
         env = SatelliteAvoidanceEnv(
-            debris_positions=debris_positions_sample,
+            debris_positions=debris_positions[:100],  # Use real TLE debris data
+            max_debris=100,
             satellite_distance=config['distance'],
-            init_angle=config['angle'],
-            collision_course=True  # Set to True if you want to initialize on a collision course
+            init_angle=config['angle']
         )
         environments.append(env)
 
     # Load the saved PPO model
-    model = PPO.load("satellite_avoidance_model_combined")
+    model = PPO.load("models/satellite_avoidance_model_combined")
 
     # Initialize lists to store data for plotting and metrics
     all_model_trajectories = []

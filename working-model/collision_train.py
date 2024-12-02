@@ -14,6 +14,10 @@ from poliastro.twobody import Orbit
 from astropy.time import Time
 from stable_baselines3.common.vec_env import SubprocVecEnv
 import psutil
+from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
+import os
+import tensorboard
+from typing import Dict
 
 # Constants for orbit and gravitational force
 G = 6.67430e-11  # Gravitational constant in m^3 kg^−1 s^−2
@@ -362,33 +366,110 @@ else:
 #)
 
 # Training code
+class MetricsCallback(BaseCallback):
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+        self.training_metrics = {
+            'collision_count': 0,
+            'rewards': [],
+            'delta_v': [],
+            'min_distances': [],
+            'successful_avoidance': 0,
+            'total_episodes': 0
+        }
+
+    def _on_step(self) -> bool:
+        # Get current env info
+        info = self.locals['infos'][0]
+        reward = self.locals['rewards'][0]
+        
+        # Update metrics
+        if info.get('collision_occurred', False):
+            self.training_metrics['collision_count'] += 1
+        else:
+            self.training_metrics['successful_avoidance'] += 1
+            
+        self.training_metrics['rewards'].append(reward)
+        self.training_metrics['delta_v'].append(np.linalg.norm(self.locals['actions'][0]))
+        
+        # Log to tensorboard
+        self.logger.record("train/collision_rate", 
+                         self.training_metrics['collision_count'] / max(1, self.n_calls))
+        self.logger.record("train/mean_reward", np.mean(self.training_metrics['rewards'][-100:]))
+        self.logger.record("train/mean_delta_v", np.mean(self.training_metrics['delta_v'][-100:]))
+        
+        return True
+
 if __name__ == '__main__':
+    # Create directories for logs and models
+    log_dir = "logs/"
+    model_dir = "models/"
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(model_dir, exist_ok=True)
+    os.makedirs(f"{model_dir}/best_model", exist_ok=True)
+
     num_envs = 6
     debris_positions_sample = [np.random.randn(3) * 10000 for _ in range(100)]
+    
+    # Create training environment
     env = SubprocVecEnv([lambda: SatelliteAvoidanceEnv(debris_positions_sample) for _ in range(num_envs)])
+    
+    # Create separate evaluation environment
+    eval_env = SatelliteAvoidanceEnv(debris_positions_sample)
 
-    # Assign process to specific logical CPUs to reduce context switching
+    # Initialize callbacks
+    eval_callback = EvalCallback(
+        eval_env,
+        best_model_save_path=f"{model_dir}/best_model/",
+        log_path=f"{log_dir}/eval/",
+        eval_freq=2048,
+        deterministic=True,
+        render=False
+    )
+    
+    metrics_callback = MetricsCallback()
+
+    # Assign process to specific logical CPUs
     psutil.Process().cpu_affinity(list(range(psutil.cpu_count(logical=True))))
 
-    # Train PPO model with increased steps and batch size for better memory utilization
-    model = PPO('MlpPolicy', env, verbose=1, device='cuda', n_steps=2048, batch_size=1024, n_epochs=10)
-    model.learn(total_timesteps=500_000)
+    # Initialize and train PPO model with callbacks
+    model = PPO('MlpPolicy', env, verbose=1, 
+                tensorboard_log=log_dir,
+                device='cuda', 
+                n_steps=2048, 
+                batch_size=1024, 
+                n_epochs=10)
 
-    # Save the trained model
-    model.save("satellite_avoidance_model_ext")
+    print("\nTo monitor training progress, run:")
+    print(f"tensorboard --logdir={log_dir}")
+    print("Then open http://localhost:6006\n")
 
-    # Test and retrieve the satellite's trajectory from one of the environments
-    env = SatelliteAvoidanceEnv(debris_positions_sample)  # Create a new instance of the environment to test the trained model
-    obs, _ = env.reset()
+    # Train with both callbacks
+    model.learn(
+        total_timesteps=500_000,
+        callback=[eval_callback, metrics_callback]
+    )
 
-    satellite_positions_history = []  # To store the trajectory of the satellite
+    # Save the final model
+    model.save(f"{model_dir}/satellite_avoidance_model_final")
 
-    # Simulate the model for 1000 steps after training to see its performance
+    # Print final metrics
+    print("\nTraining Metrics:")
+    print(f"Total Episodes: {metrics_callback.training_metrics['total_episodes']}")
+    print(f"Collision Rate: {metrics_callback.training_metrics['collision_count'] / max(1, metrics_callback.training_metrics['total_episodes']):.2%}")
+    print(f"Average Reward: {np.mean(metrics_callback.training_metrics['rewards']):.2f}")
+    print(f"Average Delta-V: {np.mean(metrics_callback.training_metrics['delta_v']):.2f} m/s")
+    
+    # Test the final model
+    test_env = SatelliteAvoidanceEnv(debris_positions_sample)
+    obs, _ = test_env.reset()
+    satellite_positions_history = []
+
     for _ in range(1000):
-        action, _states = model.predict(obs)
-        obs, reward, done, truncated, _ = env.step(action)
-        satellite_positions_history.append(env.satellite_position.tolist())
+        action, _states = model.predict(obs, deterministic=True)
+        obs, reward, done, truncated, _ = test_env.step(action)
+        satellite_positions_history.append(test_env.satellite_position.tolist())
         if done or truncated:
-            obs, _ = env.reset()
+            obs, _ = test_env.reset()
 
-    print("Training and testing complete.")
+    print("\nTesting complete.")
