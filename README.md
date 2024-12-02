@@ -57,5 +57,5 @@ Performance metrics such as collision counts, reward accumulation, delta-v usage
 [View Animation](misc/gen_media/animation.html)
 
 ### Video Demonstration
-![Demo Video](misc/gen_media/animation.html)
+![Demo Video](misc/gen_media/animation.mp4)
 
