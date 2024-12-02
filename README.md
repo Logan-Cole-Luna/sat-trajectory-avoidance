@@ -29,8 +29,8 @@ This project implements an AI-powered satellite trajectory projection and collis
 - **Gravitational Influence Modeling**: Accounts for Earth's and Moon's gravitational effects on satellite orbits.
 - **Performance Metrics Tracking**: Logs and analyzes performance metrics during simulations.
 
-<img src="misc/gen_media/CorrectOrbit.png" alt="Satellite Correct Orbit" width="250" />
-<img src="misc/gen_media/SwarmDisplay.png" alt="Swarm Display" width="250" />
+<img src="misc/gen_media/CorrectOrbit.png" alt="Satellite Correct Orbit" width="400" />
+<img src="misc/gen_media/SwarmDisplay.png" alt="Swarm Display" width="400" />
 <img src="misc/gen_media/poster.png" alt="Project Poster" width="600" />
 
 ### Video Demonstration of Training
@@ -86,8 +86,8 @@ The project uses TLE data from CelesTrak, stored in the tle_data/ directory. Ens
 Performance metrics such as collision counts, reward accumulation, delta-v usage, and minimum distances to debris are logged and can be reviewed to evaluate the model's effectiveness.
 
 ## Environment Design & Setup:
-<img src="misc/gen_media/Gravitational.png" alt="Gravitational Forces" width="250" />
-<img src="misc/gen_media/Thrust.png" alt="Thrust Action" width="250" />
+<img src="misc/gen_media/Gravitational.png" alt="Gravitational Forces" width="400" />
+<img src="misc/gen_media/Thrust.png" alt="Thrust Action" width="400" />
 
 
 ## Reward Function Design
