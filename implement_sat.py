@@ -402,7 +402,7 @@ if __name__ == '__main__':
             active_sats_positions.extend(filter(None, positions))
 
     # Use the trained PPO model
-    use_model = True
+    use_model = False
 
     # Create multiple environments for different satellites with unique heights and rotation angles
     satellite_configs = [
