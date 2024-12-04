@@ -14,6 +14,7 @@ from poliastro.twobody import Orbit
 from astropy.time import Time
 import matplotlib.pyplot as plt
 import imageio.v2 as imageio  # Add imageio for creating MP4 videos
+from utils.eval.satellite_avoidance_env import SatelliteAvoidanceEnv
 
 # Ensure that imageio's ffmpeg backend is installed for MP4 export:
 # Run the following command in your terminal:
@@ -37,9 +38,9 @@ class SatelliteAvoidanceEnv(gym.Env):
         self.max_debris = max_debris
         self.debris_positions = [np.array(debris, dtype=np.float64) for debris in debris_positions]
 
-        # Observation space: (3 for satellite position + 3 * max_debris for debris)
+        # Observation space: (3 for satellite position + 3 * max_debris for debris + 1 for dummy scalar)
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(3 + self.max_debris * 3,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(3 + self.max_debris * 3 + 1,), dtype=np.float32
         )
 
         # Set initial orbit with configurable altitude and angle
@@ -94,8 +95,8 @@ class SatelliteAvoidanceEnv(gym.Env):
         elif len(debris_flat) < self.max_debris * 3:
             debris_flat = np.pad(debris_flat, (0, self.max_debris * 3 - len(debris_flat)), mode='constant')
 
-        # Return satellite position concatenated with debris positions
-        return np.concatenate([self.satellite_position, debris_flat])
+        # Return satellite position, debris positions, and a dummy scalar to match the model's observation size
+        return np.concatenate([self.satellite_position, debris_flat, [0.0]])
 
     def _apply_gravitational_force(self):
         # Calculate the distance from the Earth's center
@@ -150,7 +151,7 @@ class SatelliteAvoidanceEnv(gym.Env):
 
         reward -= 0.1  # Small time penalty to incentivize efficiency
 
-        return self._get_obs(), reward, done, {'collision_occurred': collision_occurred}
+        return self._get_obs(), reward, done, False, {'collision_occurred': collision_occurred}  # Add truncated=False
 
     def render(self, mode='human'):
         print(f"Satellite position: {self.satellite_position}")
@@ -194,7 +195,7 @@ def create_earth_model():
     return earth_model
 
 # Simplified plot function without model trajectory
-def plot_orbits_and_collisions_plotly(active_positions, debris_positions, use_dynamic_scaling=True, scaling_factor=5000, export_animation=False, export_path_html="animation.html", export_path_gif="animation.gif"):
+def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_trajectories=None, use_dynamic_scaling=True, scaling_factor=5000, export_animation=False, export_path_html="animation.html", export_path_gif="animation.gif"):
     fig = go.Figure()
 
     # Initialize traces for Earth
@@ -238,7 +239,7 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, use_dy
 
     # Create frames for animation
     frames = []
-    num_frames = 100
+    num_frames = 500
     max_allowed_frames = 50
     frame_step = max(1, num_frames // max_allowed_frames)
     
@@ -280,6 +281,21 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, use_dy
     for trace in trajectory_data:
         fig.add_trace(trace)
 
+    # Add model trajectories to static paths
+    colors = ['lime', 'cyan', 'magenta', 'yellow', 'orange', 'purple', 'pink', 'brown']
+    if model_trajectories:
+        for idx, model_trajectory in enumerate(model_trajectories):
+            color = colors[idx % len(colors)]
+            trajectory_data.append(go.Scatter3d(
+                x=[pos[0]/1000 for pos in model_trajectory],
+                y=[pos[1]/1000 for pos in model_trajectory],
+                z=[pos[2]/1000 for pos in model_trajectory],
+                mode='lines',
+                line=dict(color=f'rgba(0,255,0,0.5)', width=2),
+                name=f'Model Satellite {idx+1} Path',
+                showlegend=True
+            ))
+
     for frame in tqdm(range(0, num_frames, frame_step), desc="Creating animation frames"):
         frame_data = []
         # Add moving satellite markers
@@ -307,6 +323,20 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, use_dy
                 name=f'Debris {j+1}',
                 showlegend=False
             ))
+
+        # Add moving model satellite markers
+        if model_trajectories:
+            for idx, trajectory in enumerate(model_trajectories):
+                model_idx = int((frame / num_frames) * (len(trajectory) - 1))
+                frame_data.append(go.Scatter3d(
+                    x=[trajectory[model_idx][0]/1000],
+                    y=[trajectory[model_idx][1]/1000],
+                    z=[trajectory[model_idx][2]/1000],
+                    mode='markers',
+                    marker=dict(size=8, color='lime', symbol='diamond'),
+                    name=f'Model Satellite {idx+1}',
+                    showlegend=False
+                ))
 
         # Export frame as image if animation export is enabled
         if export_animation:
@@ -365,6 +395,12 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, use_dy
         
         # Clean up frame images
         import shutil
+        shutil.rmtree("frames")
+        
+        # Save HTML version
+        fig.write_html(export_path_html)
+        print(f"Animation exported to {export_path_html}")
+        
     fig.show()
 
 # Simplified function to read TLE data from local file only
@@ -435,7 +471,15 @@ tle_files = [
 
 # Simplified main execution
 if __name__ == '__main__':
-    # Time range for simulation (e.g., 5 days)
+    # First load the model to check its observation space
+    model = PPO.load("models/satellite_avoidance_model_combined")
+    expected_obs_size = model.observation_space.shape[0]  # Should be 307
+    max_debris = (expected_obs_size - 3) // 3  # Calculate required max_debris from model's observation space
+    
+    print(f"Model expects observation size: {expected_obs_size}")
+    print(f"Calculated max_debris: {max_debris}")
+
+    # Time range for simulation
     time_range = 86400 * 5
 
     # Fetch and calculate orbits from local files only
@@ -450,10 +494,64 @@ if __name__ == '__main__':
         else:
             active_sats_positions.extend(filter(None, positions))
 
-    # Create the visualization
+    # Pad or truncate debris_positions to match exactly what the model expects
+    if len(debris_positions) < max_debris:
+        # Pad with copies of existing debris if we don't have enough
+        while len(debris_positions) < max_debris:
+            debris_positions.append(debris_positions[0])
+    else:
+        # Truncate if we have too many
+        debris_positions = debris_positions[:max_debris]
+
+    # Create multiple environments for different satellites
+    satellite_configs = [
+        {'distance': 700e3, 'angle': 45},
+        {'distance': 10000e3, 'angle': 30},
+        {'distance': 60000e3, 'angle': 60},
+    ]
+
+    # Initialize environments with the exact number of debris points
+    environments = []
+    for config in satellite_configs:
+        env = SatelliteAvoidanceEnv(
+            debris_positions=debris_positions,  # Pass exactly max_debris positions
+            max_debris=max_debris,
+            satellite_distance=config['distance'],
+            init_angle=config['angle']
+        )
+        environments.append(env)
+
+    print(f"Model observation space: {model.observation_space.shape}")
+    print(f"Environment observation space: {environments[0].observation_space.shape}")
+
+    # Verify observation spaces match
+    assert model.observation_space.shape == environments[0].observation_space.shape, \
+        f"Observation space mismatch: model {model.observation_space.shape} != env {environments[0].observation_space.shape}"
+
+    # Simulate model trajectories
+    all_model_trajectories = []
+    num_steps = 1000
+
+    for i, env in enumerate(environments):
+        print(f"Simulating trajectory for Model Satellite {i+1}...")
+        model_trajectory = []
+        obs, _ = env.reset()
+        
+        for _ in range(num_steps):
+            action, _states = model.predict(obs)
+            obs, reward, done, truncated, info = env.step(action)
+            model_trajectory.append((env.satellite_position / 1000).tolist())
+            if done:
+                break
+        
+        all_model_trajectories.append(model_trajectory)
+        print(f"Completed simulation for Model Satellite {i+1}")
+
+    # Create the visualization with model trajectories
     plot_orbits_and_collisions_plotly(
         active_sats_positions,
         debris_positions,
+        model_trajectories=all_model_trajectories,
         use_dynamic_scaling=True,
         scaling_factor=500,
         export_animation=True,
