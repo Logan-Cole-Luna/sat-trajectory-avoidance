@@ -13,7 +13,7 @@ from poliastro.bodies import Earth
 from poliastro.twobody import Orbit
 from astropy.time import Time
 import matplotlib.pyplot as plt
-import imageio  # Add imageio for creating MP4 videos
+import imageio.v2 as imageio  # Add imageio for creating MP4 videos
 
 # Ensure that imageio's ffmpeg backend is installed for MP4 export:
 # Run the following command in your terminal:
@@ -23,6 +23,7 @@ import imageio  # Add imageio for creating MP4 videos
 G = 6.67430e-11  # Gravitational constant in m^3 kg^−1 s^−2
 M = 5.972e24     # Mass of Earth in kg
 EARTH_RADIUS = 6371e3  # Earth's radius in meters
+MAX_DISTANCE = 10000  # Maximum allowed distance from Earth in meters for debris
 
 # Custom Satellite Avoidance Environment
 class SatelliteAvoidanceEnv(gym.Env):
@@ -200,6 +201,14 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, use_dy
     earth_model = create_earth_model()
     fig.add_trace(earth_model)
 
+    # Filter debris trajectories that are too far
+    filtered_debris_positions = []
+    for debris in debris_positions:
+        if debris:  # Check if debris is not None
+            avg_distance = average_distance_from_earth(debris)
+            if avg_distance <= MAX_DISTANCE:
+                filtered_debris_positions.append(debris)
+
     # Initialize trajectory lines
     satellite_lines = []
     debris_lines = []
@@ -215,7 +224,7 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, use_dy
         satellite_lines.append(line)
         fig.add_trace(line)
     
-    for j in range(len(debris_positions)):
+    for j in range(len(filtered_debris_positions)):
         line = go.Scatter3d(
             x=[],
             y=[],
@@ -240,68 +249,84 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, use_dy
         from PIL import Image
         os.makedirs("frames", exist_ok=True)
 
-    for frame in range(0, num_frames, frame_step):
-        if frame % 50 == 0:
-            print(f"Frame loaded: {frame}")
-        
+    # Pre-calculate complete trajectory paths
+    trajectory_data = []
+    
+    # Add complete satellite trajectories (static paths)
+    for i, positions in enumerate(active_positions):
+        trajectory_data.append(go.Scatter3d(
+            x=[pos[0]/1000 for pos in positions],
+            y=[pos[1]/1000 for pos in positions],
+            z=[pos[2]/1000 for pos in positions],
+            mode='lines',
+            line=dict(color='rgba(0,0,255,0.5)', width=1),  # Use rgba color for transparency
+            name=f'Satellite {i+1} Path',
+            showlegend=True
+        ))
+
+    # Add complete debris trajectories (static paths)
+    for j, debris in enumerate(filtered_debris_positions):
+        trajectory_data.append(go.Scatter3d(
+            x=[pos[0]/1000 for pos in debris],
+            y=[pos[1]/1000 for pos in debris],
+            z=[pos[2]/1000 for pos in debris],
+            mode='lines',
+            line=dict(color='rgba(255,0,0,0.3)', width=1),  # Use rgba color for transparency
+            name=f'Debris {j+1} Path',
+            showlegend=True
+        ))
+
+    # Add static paths to figure
+    for trace in trajectory_data:
+        fig.add_trace(trace)
+
+    for frame in tqdm(range(0, num_frames, frame_step), desc="Creating animation frames"):
         frame_data = []
-        # Update trajectory lines and positions for satellites and debris
+        # Add moving satellite markers
         for i, positions in enumerate(active_positions):
-            if frame < len(positions):
-                traj = go.Scatter3d(
-                    x=[pos[0]/1000 for pos in positions[:frame+1]],
-                    y=[pos[1]/1000 for pos in positions[:frame+1]],
-                    z=[pos[2]/1000 for pos in positions[:frame+1]],
-                    mode='lines',
-                    line=dict(color='cyan', width=2),
-                    showlegend=False
-                )
-                frame_data.append(traj)
-                frame_data.append(go.Scatter3d(
-                    x=[positions[frame][0]/1000],
-                    y=[positions[frame][1]/1000],
-                    z=[positions[frame][2]/1000],
-                    mode='markers',
-                    marker=dict(size=6, color='cyan', symbol='circle'),
-                    name=f'Satellite {i+1}'
-                ))
+            idx = int((frame / num_frames) * (len(positions) - 1))
+            frame_data.append(go.Scatter3d(
+                x=[positions[idx][0]/1000],
+                y=[positions[idx][1]/1000],
+                z=[positions[idx][2]/1000],
+                mode='markers',
+                marker=dict(size=6, color='cyan', symbol='circle'),
+                name=f'Satellite {i+1}',
+                showlegend=False
+            ))
 
-        for j, debris in enumerate(debris_positions):
-            if frame < len(debris):
-                traj = go.Scatter3d(
-                    x=[pos[0]/1000 for pos in debris[:frame+1]],
-                    y=[pos[1]/1000 for pos in debris[:frame+1]],
-                    z=[pos[2]/1000 for pos in debris[:frame+1]],
-                    mode='lines',
-                    line=dict(color='yellow', width=1),
-                    showlegend=False
-                )
-                frame_data.append(traj)
-                frame_data.append(go.Scatter3d(
-                    x=[debris[frame][0]/1000],
-                    y=[debris[frame][1]/1000],
-                    z=[debris[frame][2]/1000],
-                    mode='markers',
-                    marker=dict(size=4, color='yellow', symbol='circle'),
-                    name=f'Debris {j+1}'
-                ))
+        # Add moving debris markers
+        for j, debris in enumerate(filtered_debris_positions):
+            idx = int((frame / num_frames) * (len(debris) - 1))
+            frame_data.append(go.Scatter3d(
+                x=[debris[idx][0]/1000],
+                y=[debris[idx][1]/1000],
+                z=[debris[idx][2]/1000],
+                mode='markers',
+                marker=dict(size=4, color='yellow', symbol='circle'),
+                name=f'Debris {j+1}',
+                showlegend=False
+            ))
 
-        # Export frame as image for MP4
+        # Export frame as image if animation export is enabled
         if export_animation:
-            fig_temp = go.Figure(data=frame_data)
+            fig_temp = go.Figure(data=trajectory_data + frame_data)
             fig_temp.update_layout(
                 scene=dict(
                     aspectmode="data",
                     bgcolor="black"
                 ),
                 title='Animated 3D Orbits with Earth and Debris',
-                showlegend=False
+                showlegend=True
             )
             temp_image_path = f"frames/frame_{frame}.png"
             fig_temp.write_image(temp_image_path)
             images.append(imageio.imread(temp_image_path))
 
-    fig.frames = frames
+        frames.append(go.Frame(data=frame_data, name=f'frame{frame}'))
+
+    # Add initial marker positions
+    fig.add_traces(frames[0].data)
 
     # Update layout for animation
     fig.update_layout(
@@ -322,24 +347,24 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, use_dy
     )
 
     if export_animation:
-        # Save images as GIF
-        images[0].save(
+        # Convert numpy arrays to PIL Images before saving
+        pil_images = []
+        for img_array in images:
+            pil_image = Image.fromarray(img_array)
+            pil_images.append(pil_image)
+
+        # Save images as GIF using PIL images
+        pil_images[0].save(
             export_path_gif,
             save_all=True,
-            append_images=images[1:],
-            duration=100,  # Duration for each frame in milliseconds
-            loop=0  # 0 means loop indefinitely
+            append_images=pil_images[1:],
+            duration=100,
+            loop=0
         )
         print(f"Animation exported as GIF to {export_path_gif}")
         
         # Clean up frame images
         import shutil
-        shutil.rmtree("frames")
-        
-        # Save HTML version
-        fig.write_html(export_path_html)
-        print(f"Animation exported to {export_path_html}")
-        
     fig.show()
 
 # Simplified function to read TLE data from local file only
@@ -378,14 +403,20 @@ def calculate_orbit_positions(tle_group, time_range):
         return None
 
     positions = []
+    is_debris = 'debris' in name.lower()  # Determine if the group is debris
     for t in np.linspace(0, time_range, 1000):  # Increase the number of points for smoothness
         jd, fr = jday(2024, 10, 9, 12, 0, 0 + t)  # Adjust based on time range
         e, r, v = satellite.sgp4(jd, fr)  # Get position (r) and velocity (v)
         if e == 0:  # Only add positions if no error occurred
-            positions.append(r)
+            distance = np.linalg.norm(r)
+            if is_debris:
+                if distance <= MAX_DISTANCE:  # Apply distance check only for debris
+                    positions.append(r)
+            else:
+                positions.append(r)  # No distance check for active satellites
         else:
             return None  # Skip this satellite if there's an error
-    return positions
+    return positions if positions else None  # Return None if no valid positions were found
 
 # Parallel processing for orbit calculations
 def calculate_orbits_parallel(tle_groups, time_range):
