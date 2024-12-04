@@ -28,13 +28,13 @@ This project implements an AI-powered satellite trajectory projection and collis
 - **Dynamic Orbit Scaling**: Adjusts orbit scales for improved visualization.
 - **Gravitational Influence Modeling**: Accounts for Earth's and Moon's gravitational effects on satellite orbits.
 - **Performance Metrics Tracking**: Logs and analyzes performance metrics during simulations.
+### Video Demonstration of Training
+![Demo Video](misc\gen_media\orbit_animation.gif)
 
 <img src="misc/gen_media/CorrectOrbit.png" alt="Satellite Correct Orbit" width="400" />
 <img src="misc/gen_media/SwarmDisplay.png" alt="Swarm Display" width="400" />
 <img src="misc/gen_media/poster.png" alt="Project Poster" width="600" />
 
-### Video Demonstration of Training
-![Demo Video](misc/gen_media/animation.gif)
 
 ## Prerequisites
 

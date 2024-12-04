@@ -34,7 +34,8 @@ os.makedirs(output_dir, exist_ok=True)
 for name, url in tle_urls.items():
     try:
         tle_data = fetch_tle_data(url)
-        save_tle_data(tle_data, os.path.join(output_dir, f'{name.replace(" ", "_").replace("\'", "")}.tle'))
-        print(f"Saved TLE data for {name} to {output_dir}/{name.replace(' ', '_').replace('\'', '')}.tle")
+        filename = name.replace(' ', '_').replace("'", "")
+        save_tle_data(tle_data, os.path.join(output_dir, f"{filename}.tle"))
+        print(f"Saved TLE data for {name} to {output_dir}/{filename}.tle")
     except Exception as e:
         print(e)

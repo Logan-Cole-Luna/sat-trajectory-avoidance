@@ -346,8 +346,8 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_
                     aspectmode="data",
                     bgcolor="black"
                 ),
-                title='Animated 3D Orbits with Earth and Debris',
-                showlegend=True
+                title='',        # Remove the title in exported frames
+                showlegend=False # Hide the legend in exported frames
             )
             temp_image_path = f"frames/frame_{frame}.png"
             fig_temp.write_image(temp_image_path)
@@ -372,8 +372,8 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_
             aspectmode="data",
             bgcolor="black"
         ),
-        title='Animated 3D Orbits with Earth and Debris',
-        showlegend=True
+        title='',        # Remove the title
+        showlegend=False # Hide the legend
     )
 
     if export_animation:
