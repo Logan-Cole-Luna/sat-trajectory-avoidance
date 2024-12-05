@@ -33,9 +33,12 @@ This project implements an AI-powered satellite trajectory projection and collis
 
 ![Demo Video](misc/gen_media/orbit_animation.gif)
 
-<img src="misc/gen_media/CorrectOrbit.png" alt="Satellite Correct Orbit" width="400" />
-<img src="misc/gen_media/SwarmDisplay.png" alt="Swarm Display" width="400" />
-<img src="misc/gen_media/poster.png" alt="Project Poster" width="600" />
+<div style="display: flex; justify-content: center; align-items: center;">
+  <img src="misc/gen_media/CorrectOrbit.png" alt="Satellite Correct Orbit" width="400" />
+  <img src="misc/gen_media/SwarmDisplay.png" alt="Swarm Display" width="400" />
+</div>
+
+<img src="misc/gen_media/poster.png" alt="Project Poster" width="900" />
 
 
 ## Prerequisites
