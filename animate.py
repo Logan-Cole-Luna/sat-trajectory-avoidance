@@ -347,7 +347,10 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_
                     bgcolor="black"
                 ),
                 title='',        # Remove the title in exported frames
-                showlegend=False # Hide the legend in exported frames
+                showlegend=False, # Hide the legend in exported frames
+                paper_bgcolor='black',  # Set the paper background color to black
+                plot_bgcolor='black',   # Set the plot background color to black
+                margin=dict(l=0, r=0, t=0, b=0)  # Remove margins
             )
             temp_image_path = f"frames/frame_{frame}.png"
             fig_temp.write_image(temp_image_path)
