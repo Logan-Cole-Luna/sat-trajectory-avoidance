@@ -19,6 +19,23 @@
 ## Overview
 
 This project implements an AI-powered satellite trajectory projection and collision avoidance system using reinforcement learning. It combines real-world satellite tracking data (TLE - Two-Line Element sets) with a Proximal Policy Optimization (PPO) model to predict and avoid potential collisions with space debris and other satellites.
+It achieves:
+- **7.69% reduction in collision rates** compared to baseline.
+- **15.89% improvement in orbit stability** through optimized velocity adjustments.
+
+### Video Demonstration of Training
+| _Blue_: Active Satellites in orbit | _Red_: Debris in orbit | _Green_: Predicted trajectory for model|
+
+<img src="misc/gen_media/orbit_animation.gif" alt="Demo Video" width="900" />
+
+*This animation demonstrates satellite trajectory adjustments with real-time collision avoidance.*
+
+## Performance Metrics and Key Results
+
+| Metric              | PPO Model      | Baseline Policy |
+|---------------------|----------------|-----------------|
+| Collision Rate      | -7.69%         | Reference Value |
+| Orbit Stability     | +15.89%        | Reference Value |
 
 ## Features
 
@@ -28,12 +45,13 @@ This project implements an AI-powered satellite trajectory projection and collis
 - **Dynamic Orbit Scaling**: Adjusts orbit scales for improved visualization.
 - **Gravitational Influence Modeling**: Accounts for Earth's and Moon's gravitational effects on satellite orbits.
 - **Performance Metrics Tracking**: Logs and analyzes performance metrics during simulations.
-### Video Demonstration of Training
-![Demo Video](misc\gen_media\orbit_animation.gif)
 
-<img src="misc/gen_media/CorrectOrbit.png" alt="Satellite Correct Orbit" width="400" />
-<img src="misc/gen_media/SwarmDisplay.png" alt="Swarm Display" width="400" />
-<img src="misc/gen_media/poster.png" alt="Project Poster" width="600" />
+<div style="display: flex; justify-content: center; align-items: center;">
+  <img src="misc/gen_media/CorrectOrbit.png" alt="Satellite Correct Orbit" width="450" />
+  <img src="misc/gen_media/SwarmDisplay.png" alt="Swarm Display" width="450" />
+</div>
+
+<img src="misc/gen_media/poster.png" alt="Project Poster" width="900" />
 
 
 ## Prerequisites
@@ -86,17 +104,20 @@ The project uses TLE data from CelesTrak, stored in the tle_data/ directory. Ens
 Performance metrics such as collision counts, reward accumulation, delta-v usage, and minimum distances to debris are logged and can be reviewed to evaluate the model's effectiveness.
 
 ## Environment Design & Setup:
-<img src="misc/gen_media/Gravitational.png" alt="Gravitational Forces" width="400" />
-<img src="misc/gen_media/Thrust.png" alt="Thrust Action" width="400" />
+<div style="display: flex; justify-content: center; align-items: center;">
+  <img src="misc/gen_media/Gravitational.png" alt="Gravitational Forces" width="450" />
+  <img src="misc/gen_media/Thrust.png" alt="Thrust Action" width="456" />
+</div>
+
 
 
 ## Reward Function Design
-<img src="misc/gen_media/Reward.png" alt="Reward Function Design" width="400" />
+<img src="misc/gen_media/Reward.png" alt="Reward Function Design" width="450" />
 
 ## Current Results
 
 ### Baseline Function For Evaluation:
-<img src="misc/gen_media/Baseline.png" alt="Baseline Function" width="600" />
+<img src="misc/gen_media/Baseline.png" alt="Baseline Function" width="800" />
 
 - **Velocity Adjustment**: Adjusts velocity away from the nearest debris object if it is within a defined unsafe distance.
 - **No Action**: Maintains current trajectory if no debris is within the unsafe distance.
