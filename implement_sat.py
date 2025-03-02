@@ -1,4 +1,13 @@
-# implement_combined_satellite_model.py
+"""
+This module implements a combined satellite simulation, which includes:
+- Fetching TLE data from local files.
+- Calculating satellite orbits using TLE data.
+- Creating 3D models of the Earth and Moon.
+- Plotting satellite, debris, and model trajectories with Plotly.
+- Simulating satellite avoidance using a custom environment and a PPO model.
+
+All existing functionality has been preserved while adding detailed documentation.
+"""
 
 import requests
 import numpy as np
@@ -33,13 +42,30 @@ TLE_URLS = {
 }
 
 def fetch_tle_data(local_file_path):
-    """Load TLE data from local file."""
+    """
+    Load TLE data from a local file.
+    
+    Parameters:
+        local_file_path (str): Path to the TLE data local file.
+        
+    Returns:
+        List[List[str]]: List of TLE groups each containing 3 lines.
+    """
     with open(local_file_path, 'r') as file:
         tle_data = file.read().splitlines()
         return [tle_data[i:i + 3] for i in range(0, len(tle_data), 3)]
 
 def convert_epoch_to_datetime(epochyr, epochdays):
-    """Convert epoch year and days to a timezone-aware datetime object."""
+    """
+    Convert TLE epoch year and days to a timezone-aware datetime object.
+    
+    Parameters:
+        epochyr (int or str): Epoch year from TLE data.
+        epochdays (float): Epoch days from TLE data.
+        
+    Returns:
+        datetime: A timezone-aware datetime object.
+    """
     year = int(epochyr)
     if year < 57:
         year += 2000
@@ -49,7 +75,16 @@ def convert_epoch_to_datetime(epochyr, epochdays):
     return epoch
 
 def tle_is_outdated(epochyr, epochdays):
-    """Check if the TLE data is outdated."""
+    """
+    Check if the TLE data is outdated by comparing its epoch to the current time.
+    
+    Parameters:
+        epochyr (int or str): Epoch year.
+        epochdays (float): Epoch days.
+        
+    Returns:
+        bool: True if the TLE data is older than 30 days, otherwise False.
+    """
     tle_datetime = convert_epoch_to_datetime(epochyr, epochdays)
     days_old = (datetime.now(timezone.utc) - tle_datetime).days
     return days_old > 30  # Treat as outdated if older than 30 days
@@ -58,7 +93,16 @@ def tle_is_outdated(epochyr, epochdays):
 MAX_DISTANCE = 3e5  # Maximum allowed distance from Earth in meters (300,000m)
 
 def calculate_orbit_positions(tle_group, time_range):
-    """Calculate satellite positions using TLE data."""
+    """
+    Calculate satellite positions over a given time range using TLE data.
+    
+    Parameters:
+        tle_group (List[str]): A single TLE data group containing 3 lines.
+        time_range (float): Total simulation time in seconds.
+        
+    Returns:
+        List[List[float]] or None: A list of satellite position vectors if valid, otherwise None.
+    """
     name, line1, line2 = tle_group
     satellite = Satrec.twoline2rv(line1, line2)
 
@@ -79,18 +123,46 @@ def calculate_orbit_positions(tle_group, time_range):
     return positions
 
 def calculate_orbits_parallel(tle_groups, time_range):
-    """Parallel processing for orbit calculations."""
+    """
+    Process orbit calculations in parallel for multiple TLE groups.
+    
+    Parameters:
+        tle_groups (List[List[str]]): List of TLE groups.
+        time_range (float): Total simulation time in seconds.
+        
+    Returns:
+        List: List of calculated positions for each satellite.
+    """
     with ThreadPoolExecutor() as executor:
         return list(tqdm(executor.map(lambda tle_group: calculate_orbit_positions(tle_group, time_range), tle_groups), total=len(tle_groups)))
 
 def average_distance_from_earth(positions):
-    """Calculate the average distance from Earth given a list of 3D positions."""
+    """
+    Compute the average distance from Earth given satellite positions.
+    
+    Parameters:
+        positions (List[array-like]): List of position vectors.
+        
+    Returns:
+        float: The average distance from the Earth.
+    """
     earth_center = np.array([0, 0, 0])  # Earth is centered at the origin
     distances = [np.linalg.norm(pos - earth_center) for pos in positions]
     return np.mean(distances)
 
 def dynamic_orbit_duration_inverse(distance, min_duration=50, max_duration=500, scaling_factor=5000):
-    """Dynamically scale the number of orbit points based on inverse distance from Earth."""
+    """
+    Dynamically scale the number of orbit points based on the distance from Earth.
+    
+    Parameters:
+        distance (float): Average distance from Earth.
+        min_duration (int): Minimum number of points.
+        max_duration (int): Maximum number of points.
+        scaling_factor (float): Scaling factor controlling the transition.
+        
+    Returns:
+        int: Calculated number of orbit points.
+    """
     if distance < scaling_factor:
         duration = int(max_duration - (distance / scaling_factor) * (max_duration - min_duration))
     else:
@@ -98,7 +170,12 @@ def dynamic_orbit_duration_inverse(distance, min_duration=50, max_duration=500, 
     return duration
 
 def create_earth_model():
-    """Create a 3D Earth model."""
+    """
+    Create a 3D model of Earth using Plotly.
+    
+    Returns:
+        go.Surface: A Plotly Surface object representing the Earth.
+    """
     u = np.linspace(0, 2 * np.pi, 100)
     v = np.linspace(0, np.pi, 100)
     x = 6371 * np.outer(np.cos(u), np.sin(v))  # Earth radius ~6371 km
@@ -117,6 +194,12 @@ def create_earth_model():
     return earth_model
 
 def create_moon_model():
+    """
+    Create a 3D model of the Moon using Plotly.
+    
+    Returns:
+        go.Surface: A Plotly Surface object representing the Moon.
+    """
     # Create the Moon model (approximate position and scale)
     moon_distance = 384400 * 1000  # Average distance to the Moon in meters
     moon_x = moon_distance / 1000  # Simple placement along x-axis for visualization
@@ -138,7 +221,16 @@ def create_moon_model():
     return moon_model
 
 def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_trajectories, use_dynamic_scaling=True, scaling_factor=5000):
-    """Plot orbits and check for collisions with Plotly."""
+    """
+    Plot satellite and debris orbits along with model trajectories using Plotly.
+    
+    Parameters:
+        active_positions (List[List[array-like]]): Positions of active satellites.
+        debris_positions (List[List[array-like]]): Positions of debris.
+        model_trajectories (List[List[array-like]]): Trajectories from the model satellites.
+        use_dynamic_scaling (bool): Flag to apply dynamic scaling to orbit lengths.
+        scaling_factor (float): Factor for dynamic orbit duration calculation.
+    """
     fig = go.Figure()
 
     # Plot active satellite orbits
@@ -160,14 +252,12 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_
             line=dict(color='rgba(0, 0, 255, 0.5)', width=3),
             name='Active Satellite Orbit'
         ))
-
         fig.add_trace(go.Scatter3d(
             x=x_vals, y=y_vals, z=z_vals,
             mode='markers',
             marker=dict(size=sizes, color='cyan', opacity=0.8),
             name='Orbit Points (Scaled)'
         ))
-
         current_pos = positions[0]
         fig.add_trace(go.Scatter3d(
             x=[current_pos[0]], y=[current_pos[1]], z=[current_pos[2]],
@@ -191,7 +281,6 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_
             line=dict(color='rgba(255, 0, 0, 0.5)', width=1),
             name='Debris Orbit'
         ))
-
         current_pos_debris = positions_debris[0]
         fig.add_trace(go.Scatter3d(
             x=[current_pos_debris[0]], y=[current_pos_debris[1]], z=[current_pos_debris[2]],
@@ -200,12 +289,12 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_
             name='Current Debris Position'
         ))
 
-    # Plot model satellite trajectories
-    colors = ['lime', 'cyan', 'magenta', 'yellow', 'orange', 'purple', 'pink', 'brown']
+    # Plot model satellite trajectories if available
     if model_trajectories:
+        colors = ['lime', 'cyan', 'magenta', 'yellow', 'orange', 'purple', 'pink', 'brown']
         for idx, model_trajectory in enumerate(model_trajectories):
             model_x_vals, model_y_vals, model_z_vals = zip(*model_trajectory)
-            color = colors[idx % len(colors)]  # Cycle through colors
+            color = colors[idx % len(colors)]
             fig.add_trace(go.Scatter3d(
                 x=model_x_vals, y=model_y_vals, z=model_z_vals,
                 mode='lines+markers',
@@ -217,7 +306,6 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_
     # Create and add Earth & Moon models
     earth_model = create_earth_model()
     fig.add_trace(earth_model)
-
     moon_model = create_moon_model()
     fig.add_trace(moon_model)
 
@@ -233,11 +321,17 @@ def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_
         title='3D Orbits with Earth, Debris, and Model Satellites',
         showlegend=True
     )
-
     fig.show()
 
-
 def plot_orbits_gravitational(active_positions, debris_positions, model_trajectory):
+    """
+    Plot orbits superimposed on gravitational wave patterns for Earth and Moon.
+    
+    Parameters:
+        active_positions (List[List[array-like]]): Positions of active satellites.
+        debris_positions (List[List[array-like]]): Positions of debris.
+        model_trajectory (List[array-like] or None): Trajectory from a model satellite.
+    """
     import plotly.graph_objects as go
     import numpy as np
     from astropy import units as u
@@ -250,25 +344,22 @@ def plot_orbits_gravitational(active_positions, debris_positions, model_trajecto
 
     # Get Moon position relative to Earth
     t0 = Time('2024-10-09 12:00:00', scale='utc')
-
     with solar_system_ephemeris.set('jpl'):
         earth_pos = get_body_barycentric('earth', t0)
         moon_pos = get_body_barycentric('moon', t0)
-
     moon_pos_rel = (moon_pos - earth_pos).get_xyz().to(u.km).value.flatten()
 
-    # Determine plot boundaries based on maximum extent of the positions
+    # Determine plot boundaries based on positions
     max_extent = max(
         np.max([np.max(np.abs(pos)) for pos in active_positions] +
                [np.max(np.abs(pos)) for pos in debris_positions] +
                [np.max(np.abs(moon_pos_rel))]),
-        5 * EARTH_RADIUS  # Ensure a minimum size
+        5 * EARTH_RADIUS
     )
 
-    # Create the figure
     fig = go.Figure()
 
-    # Plot the Earth
+    # Plot Earth
     u_vals = np.linspace(0, 2 * np.pi, 100)
     v_vals = np.linspace(0, np.pi, 100)
     x_earth = EARTH_RADIUS * np.outer(np.cos(u_vals), np.sin(v_vals))
@@ -284,8 +375,8 @@ def plot_orbits_gravitational(active_positions, debris_positions, model_trajecto
         name='Earth'
     ))
 
-    # Plot the Moon
-    moon_scale_factor = 1  # Keep actual size for Moon
+    # Plot Moon
+    moon_scale_factor = 1
     x_moon = MOON_RADIUS * moon_scale_factor * np.outer(np.cos(u_vals), np.sin(v_vals)) + moon_pos_rel[0]
     y_moon = MOON_RADIUS * moon_scale_factor * np.outer(np.sin(u_vals), np.sin(v_vals)) + moon_pos_rel[1]
     z_moon = MOON_RADIUS * moon_scale_factor * np.outer(np.ones(np.size(u_vals)), np.cos(v_vals)) + moon_pos_rel[2]
@@ -299,18 +390,15 @@ def plot_orbits_gravitational(active_positions, debris_positions, model_trajecto
         name='Moon'
     ))
 
-    # Plot gravitational waves for Earth and Moon originating from their positions
-    grid_size = 500  # Increase grid size for better coverage
+    # Gravitational wave patterns for Earth and Moon
+    grid_size = 500
     wave_amplitude_earth = 0.5 * EARTH_RADIUS
     wave_amplitude_moon = 0.5 * MOON_RADIUS
 
-    # Generate a larger grid to cover more space
     x_grid = np.linspace(-max_extent, max_extent, grid_size)
     y_grid = np.linspace(-max_extent, max_extent, grid_size)
     x_wave, y_wave = np.meshgrid(x_grid, y_grid)
-
-    # Earth wave pattern
-    dist_earth = np.sqrt((x_wave - 0)**2 + (y_wave - 0)**2)
+    dist_earth = np.sqrt(x_wave**2 + y_wave**2)
     wave_earth = wave_amplitude_earth * np.sin(dist_earth * 2 * np.pi / EARTH_RADIUS)
     fig.add_trace(go.Surface(
         x=x_wave, y=y_wave, z=wave_earth,
@@ -320,7 +408,6 @@ def plot_orbits_gravitational(active_positions, debris_positions, model_trajecto
         name='Earth Wave'
     ))
 
-    # Moon wave pattern
     x_moon_wave = np.linspace(-max_extent + moon_pos_rel[0], max_extent + moon_pos_rel[0], grid_size)
     y_moon_wave = np.linspace(-max_extent + moon_pos_rel[1], max_extent + moon_pos_rel[1], grid_size)
     x_moon_grid, y_moon_grid = np.meshgrid(x_moon_wave, y_moon_wave)
@@ -334,7 +421,7 @@ def plot_orbits_gravitational(active_positions, debris_positions, model_trajecto
         name='Moon Wave'
     ))
 
-    # Plot satellite trajectories
+    # Plot satellite and debris trajectories
     for positions in active_positions:
         x_vals, y_vals, z_vals = zip(*positions)
         fig.add_trace(go.Scatter3d(
@@ -343,8 +430,6 @@ def plot_orbits_gravitational(active_positions, debris_positions, model_trajecto
             line=dict(color='blue', width=1),
             name='Satellite Orbit'
         ))
-
-    # Plot debris trajectories
     for positions in debris_positions:
         x_vals, y_vals, z_vals = zip(*positions)
         fig.add_trace(go.Scatter3d(
@@ -353,8 +438,6 @@ def plot_orbits_gravitational(active_positions, debris_positions, model_trajecto
             line=dict(color='red', width=1),
             name='Debris Orbit'
         ))
-
-    # Plot the model satellite trajectory
     if model_trajectory:
         x_vals, y_vals, z_vals = zip(*model_trajectory)
         fig.add_trace(go.Scatter3d(
@@ -365,7 +448,6 @@ def plot_orbits_gravitational(active_positions, debris_positions, model_trajecto
             name='Model Satellite Path'
         ))
 
-    # Update layout to center on Earth and adjust scale
     fig.update_layout(
         scene=dict(
             xaxis=dict(title='X (km)', showbackground=False),
@@ -373,14 +455,11 @@ def plot_orbits_gravitational(active_positions, debris_positions, model_trajecto
             zaxis=dict(title='Z (km)', showbackground=False),
             aspectmode='data',
             bgcolor='black',
-            camera=dict(
-                eye=dict(x=2.5, y=2.5, z=2.5)  # Adjust the camera position for better view
-            )
+            camera=dict(eye=dict(x=2.5, y=2.5, z=2.5))
         ),
         title='Satellite Orbits with Earth and Moon Waves',
         showlegend=True
     )
-
     fig.show()
 
 
@@ -447,23 +526,17 @@ if __name__ == '__main__':
             if 'collision_occurred' in info and info['collision_occurred']:
                 collision_occurred = True
             model_trajectory.append((env.satellite_position / 1000).tolist())  # Convert to km
-            # Calculate distance to nearest debris
             distances = [np.linalg.norm(env.satellite_position - debris) for debris in env.debris_positions]
             min_distance = min(distances)
             if min_distance < min_distance_to_debris:
                 min_distance_to_debris = min_distance
             cumulative_reward += reward
             if done:
-                break  # Exit the loop if done
+                break
 
-        # Store the model trajectory
         all_model_trajectories.append(model_trajectory)
-
-        # Compute performance metrics
         num_steps_taken = len(actions)
         total_delta_v = sum(np.linalg.norm(a) for a in actions)
-
-        # Store performance metrics
         metrics = {
             'satellite_id': i + 1,
             'num_steps_taken': num_steps_taken,
@@ -474,7 +547,6 @@ if __name__ == '__main__':
         }
         performance_metrics.append(metrics)
 
-        # Print out performance metrics
         print(f"Satellite {i + 1} Performance Metrics:")
         print(f"  Total steps taken: {num_steps_taken}")
         print(f"  Total delta-v used: {total_delta_v:.4f} m/s")
@@ -483,10 +555,8 @@ if __name__ == '__main__':
         print(f"  Minimum distance to debris: {min_distance_to_debris:.2f} meters")
         print()
 
-    # Use dynamic scaling for plotting
-    use_dynamic_scaling = True  # Set to True for dynamic orbit plotting, False for full orbits
+    use_dynamic_scaling = True
 
-    # Create the interactive 3D plot using Plotly for all satellites
     plot_orbits_and_collisions_plotly(
         active_positions=active_sats_positions,
         debris_positions=debris_positions,

@@ -1,3 +1,9 @@
+"""
+This module provides functionality to fetch satellite TLE data, simulate orbital dynamics, 
+and run a training loop using PPO for satellite avoidance. It includes functions to generate 
+plots using Plotly and a custom Gym environment.
+"""
+
 import numpy as np
 import requests
 from sgp4.api import Satrec, jday
@@ -26,6 +32,19 @@ EARTH_RADIUS = 6371e3  # Earth's radius in meters
 
 # Function to fetch TLE data from a URL or fallback to a local file
 def fetch_tle_data(url, local_file_path):
+    """
+    Fetch Three-Line Element (TLE) data from a URL with a fallback to a local file.
+    
+    Parameters:
+        url (str): The URL to fetch TLE data from.
+        local_file_path (str): The local file path to read TLE data if fetching fails.
+    
+    Returns:
+        List[List[str]]: A list of TLE groups where each group contains 3 lines (Name, Line1, Line2).
+    
+    Raises:
+        Exception: If neither network nor local file access is successful.
+    """
     try:
         response = requests.get(url)
         if response.status_code == 200:
@@ -46,7 +65,21 @@ def fetch_tle_data(url, local_file_path):
 
 # Custom Satellite Avoidance Environment
 class SatelliteAvoidanceEnv(gym.Env):
+    """
+    A custom Gym Environment for satellite avoidance scenarios.
+    
+    Parameters:
+        debris_positions (List[array-like]): Positions of debris objects.
+        max_debris (int): Maximum number of debris objects considered.
+    """
     def __init__(self, debris_positions, max_debris=100):
+        """
+        Initialize the SatelliteAvoidanceEnv.
+        
+        Parameters:
+            debris_positions (List[array-like]): Initial debris positions.
+            max_debris (int): Maximum number of debris objects.
+        """
         super(SatelliteAvoidanceEnv, self).__init__()
 
         # Action: changes in velocity in x, y, z directions
@@ -68,6 +101,9 @@ class SatelliteAvoidanceEnv(gym.Env):
         self._set_debris_intersection()
 
     def _set_debris_intersection(self):
+        """
+        Set debris positions ensuring at least one debris intersects the initial orbit.
+        """
         # Set one of the debris positions directly in the path of the initial orbit
         self.debris_positions[0] = self.satellite_position + np.array([5000.0, 0.0, 0.0])  # Position debris along the initial trajectory path
 
@@ -76,6 +112,16 @@ class SatelliteAvoidanceEnv(gym.Env):
             self.debris_positions[i] = np.random.randn(3) * 10000
 
     def reset(self, seed=None, options=None):
+        """
+        Reset the environment to its initial state.
+        
+        Parameters:
+            seed (int, optional): Random seed.
+            options (dict, optional): Additional reset options.
+        
+        Returns:
+            tuple: A tuple containing the observation and an empty info dict.
+        """
         super().reset(seed=seed)
         # Reset satellite to elliptical orbit parameters
         self.initial_orbit = Orbit.from_classical(
@@ -99,6 +145,12 @@ class SatelliteAvoidanceEnv(gym.Env):
         return self._get_obs(), {}
 
     def _get_obs(self):
+        """
+        Construct the observation consisting of the satellite position and debris positions.
+        
+        Returns:
+            numpy.ndarray: Concatenated observation array.
+        """
         # Flatten debris positions
         debris_flat = np.array(self.debris_positions).flatten()
 
@@ -113,6 +165,9 @@ class SatelliteAvoidanceEnv(gym.Env):
         return np.concatenate([self.satellite_position, debris_flat])
 
     def _apply_gravitational_force(self):
+        """
+        Apply gravitational force on the satellite updating its velocity.
+        """
         # Calculate the distance from the Earth's center
         r = np.linalg.norm(self.satellite_position)
 
@@ -125,6 +180,15 @@ class SatelliteAvoidanceEnv(gym.Env):
         self.satellite_velocity += gravitational_force
 
     def step(self, action):
+        """
+        Execute one timestep within the environment.
+        
+        Parameters:
+            action (numpy.ndarray): Action to adjust the satellite velocity.
+        
+        Returns:
+            tuple: (observation, reward, done, truncated, info)
+        """
         # Apply action to adjust velocity (scaled for smaller effect)
         delta_v = action * 0.001  # Scale down the effect
         self.satellite_velocity += delta_v
@@ -142,6 +206,12 @@ class SatelliteAvoidanceEnv(gym.Env):
         return self._get_obs(), reward, done, truncated, {}
 
     def _calculate_reward(self):
+        """
+        Compute the reward for the current timestep.
+        
+        Returns:
+            tuple: (reward (float), done (bool))
+        """
         # Reward components
         reward = 0.0
 
@@ -176,11 +246,36 @@ class SatelliteAvoidanceEnv(gym.Env):
         return reward, False
 
     def render(self, mode='human'):
+        """
+        Render the environment state.
+        
+        Parameters:
+            mode (str): Rendering mode.
+        """
         print(f"Satellite position: {self.satellite_position}")
 
 # Function to calculate orbits in parallel
 def calculate_orbits_parallel(tle_groups, time_range):
+    """
+    Calculate satellite orbits in parallel using TLE data.
+    
+    Parameters:
+        tle_groups (List[List[str]]): List of TLE groups.
+        time_range (float): Total simulation time in seconds.
+    
+    Returns:
+        List: A list with each element being the calculated positions for a satellite.
+    """
     def calculate_single_orbit(tle_group):
+        """
+        Calculate the orbit for a single TLE group.
+        
+        Parameters:
+            tle_group (List[str]): A single TLE data group.
+        
+        Returns:
+            List: A list of positions or None if calculation fails.
+        """
         name, line1, line2 = tle_group
         satellite = Satrec.twoline2rv(line1, line2)
         positions = []
@@ -196,14 +291,33 @@ def calculate_orbits_parallel(tle_groups, time_range):
 
 # Function to calculate the average distance from Earth for a given set of positions
 def average_distance_from_earth(positions):
-    """Calculate the average distance from Earth given a list of 3D positions."""
+    """
+    Calculate the average distance from Earth given a list of 3D positions.
+    
+    Parameters:
+        positions (List[array-like]): List of position vectors.
+    
+    Returns:
+        float: The average distance from the Earth's center.
+    """
     earth_center = np.array([0, 0, 0])  # Earth is centered at the origin
     distances = [np.linalg.norm(pos - earth_center) for pos in positions]
     return np.mean(distances)
 
 # Function to scale orbit duration based on inverse distance
 def dynamic_orbit_duration_inverse(distance, min_duration=50, max_duration=500, scaling_factor=5000):
-    """Dynamically scale the number of orbit points based on inverse distance from Earth."""
+    """
+    Dynamically scale the number of orbit points based on inverse distance from Earth.
+    
+    Parameters:
+        distance (float): Average distance from Earth.
+        min_duration (int): Minimum orbit duration.
+        max_duration (int): Maximum orbit duration.
+        scaling_factor (float): Factor to scale the duration change.
+    
+    Returns:
+        int: The number of orbit points to display.
+    """
     # Closer objects get shorter durations, farther objects get longer durations
     if distance < scaling_factor:
         duration = int(max_duration - (distance / scaling_factor) * (max_duration - min_duration))
@@ -213,6 +327,12 @@ def dynamic_orbit_duration_inverse(distance, min_duration=50, max_duration=500, 
 
 # Function to create a 3D Earth model with a colorscale (instead of texture)
 def create_earth_model():
+    """
+    Create a 3D model of Earth with a predefined colorscale.
+    
+    Returns:
+        go.Surface: A Plotly Surface object representing Earth.
+    """
     # Define spherical coordinates for the Earth model
     u = np.linspace(0, 2 * np.pi, 100)
     v = np.linspace(0, np.pi, 100)
@@ -234,6 +354,16 @@ def create_earth_model():
 
 # Function to plot orbits and check for collisions with Plotly
 def plot_orbits_and_collisions_plotly(active_positions, debris_positions, model_trajectory, use_dynamic_scaling=True, scaling_factor=5000):
+    """
+    Plot orbits and collisions using Plotly.
+    
+    Parameters:
+        active_positions (List[List[array-like]]): List of active satellite positions.
+        debris_positions (List[List[array-like]]): List of debris positions.
+        model_trajectory (List[array-like] or None): Trajectory from a model, if available.
+        use_dynamic_scaling (bool): Whether to use dynamic scaling for plot durations.
+        scaling_factor (float): Scaling factor for dynamic orbit duration.
+    """
     fig = go.Figure()
 
     # Plot smooth trajectories of active satellites (dynamic or full path based on use_dynamic_scaling)
@@ -367,7 +497,19 @@ else:
 
 # Training code
 class MetricsCallback(BaseCallback):
+    """
+    Custom callback to log training metrics during PPO training.
+    
+    Attributes:
+        training_metrics (dict): Dictionary to store metrics of the training process.
+    """
     def __init__(self, verbose=0):
+        """
+        Initialize the MetricsCallback.
+        
+        Parameters:
+            verbose (int): Verbosity level.
+        """
         super().__init__(verbose)
         self.training_metrics = {
             'collision_count': 0,
@@ -379,6 +521,12 @@ class MetricsCallback(BaseCallback):
         }
 
     def _on_step(self) -> bool:
+        """
+        Called at each step to record metrics.
+        
+        Returns:
+            bool: True to indicate training should continue.
+        """
         # Get current env info
         info = self.locals['infos'][0]
         reward = self.locals['rewards'][0]
@@ -433,12 +581,17 @@ if __name__ == '__main__':
     #psutil.Process().cpu_affinity(list(range(psutil.cpu_count(logical=True))))
 
     # Initialize and train PPO model with callbacks
-    model = PPO('MlpPolicy', env, verbose=1, 
-                tensorboard_log=log_dir,
-                device='cuda', 
-                n_steps=2048, 
-                batch_size=1024, 
-                n_epochs=10)
+    model = PPO(
+        'MlpPolicy',      # Uses a Multi-Layer Perceptron (neural network) policy
+        env,              # The environment to train on
+        verbose=1,        # Level of logging output (0=none, 1=training info, 2=debug)
+        tensorboard_log=log_dir,
+        device='cuda',     
+        n_steps=2048,     # Number of steps to run for each environment per update
+        batch_size=1024,  # Number of samples per optimization step
+        n_epochs=10       # Number of times to optimize on the same data
+    )
+    # clip_range=0.2 from PPO to stabilize updates.
 
     print("\nTo monitor training progress, run:")
     print(f"tensorboard --logdir={log_dir}")
