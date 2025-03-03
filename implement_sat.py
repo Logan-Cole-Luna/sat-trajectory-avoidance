@@ -108,6 +108,7 @@ def calculate_orbit_positions(tle_group, time_range):
 
     # Check if the TLE data is outdated
     if tle_is_outdated(satellite.epochyr, satellite.epochdays):
+        print("TLE Data outdated, run tle_export.py first.")
         return None
 
     positions = []

@@ -75,7 +75,7 @@ It achieves:
 
 3. **Install Dependencies**
    ```bash
-   pip install -r requirements.txt
+   ./setup.sh 
    ```
 
 ## Usage
