@@ -1,8 +1,22 @@
 # satellite_avoidance_env.py
 
 import numpy as np
-import gymnasium as gym
-from gymnasium import spaces
+try:
+    import gymnasium as gym
+except Exception:
+    # Minimal fallback so this module can be imported without gymnasium installed
+    class _EnvBase(object):
+        pass
+    class gym:  # type: ignore
+        Env = _EnvBase
+try:
+    from gymnasium import spaces
+except Exception:
+    class _Box:
+        def __init__(self, low, high, shape, dtype):
+            self.low = low; self.high = high; self.shape = shape; self.dtype = dtype
+    class spaces:  # type: ignore
+        Box = _Box
 from astropy import units as u
 from poliastro.bodies import Earth
 from poliastro.twobody import Orbit
@@ -23,6 +37,10 @@ solar_system_ephemeris.set('de430')
 # Constants for orbit and gravitational forces
 G_const = G.value  # Gravitational constant in m^3 kg^−1 s^−2
 EARTH_RADIUS = Earth.R.to(u.m).value  # Earth's radius in meters
+# Distance thresholds (meters)
+D_SAFE = 30e3
+D_WARN = 20e3
+D_COLLIDE = 10e3
 
 class SatelliteAvoidanceEnv(gym.Env):
     """
@@ -48,66 +66,126 @@ class SatelliteAvoidanceEnv(gym.Env):
     """
 
     def __init__(
-        self,
-        debris_positions,
-        max_debris=100,
-        satellite_distance=None,  # Optional: Desired orbit altitude in meters
-        init_angle=None,          # Optional: Inclination angle in degrees
-        collision_course_probability=1.0,  # Default to always on collision course
-        enable_quantitative_metrics=False,
-        enable_qualitative_evaluation=False,
-        enable_advanced_evaluation=False,
-        enable_visualization_tools=False,
-        enable_comparative_analysis=False,
-        enable_robustness_testing=False
+            self,
+            debris_positions,
+            max_debris=100,
+            satellite_distance=None,
+            init_angle=None,
+            collision_course_probability=1.0,
+            guarantee_collision=False,
+            collision_ttc_steps=None,
+            debris_radius_m: float = 0.0,
+            # Control capability
+            max_thrust: float = 0.05,
+            # Dynamic debris parameters
+            dynamic_debris: bool = False,
+            debris_lateral_speed: float = 30.0,
+            lateral_offset_scale: float = 5000.0,
+            # Tunables
+            collision_distance_m: float | None = None,
+            approach_speed_scale: float = 1.0,
+            start_offset_scale: float = 1.0,
+            # Feature flags
+            enable_quantitative_metrics=False,
+            enable_qualitative_evaluation=False,
+            enable_advanced_evaluation=False,
+            enable_visualization_tools=False,
+            enable_comparative_analysis=False,
+            enable_robustness_testing=False,
+            # Reward shaping coefficients (configurable)
+            collision_penalty: float = 500.0,
+            survival_reward: float = 0.02,
+            distance_shaping_coeff: float = 0.0002,
+            coast_bonus: float = 0.05,
+            delta_v_linear_cost: float = 6.0,
+            delta_v_quadratic_cost: float = 0.5,
+            large_burn_penalty: float = 3.0,
+            smoothness_penalty: float = 0.005,
+            cumulative_dv_penalty: float = 0.2,
+            projected_miss_reward: float = 0.0002,
+            milestone_reward: float = 0.4,
+            # Legacy parameters (for compatibility)
+            dv_linear_cost: float = 10.0,
+            dv_quadratic_cost: float = 2.0,
+            large_burn_threshold: float = 0.4,
+            large_burn_quadratic_cost: float = 12.0,
+            coast_bonus_legacy: float = 0.5,
+            danger_action_bonus: float = 4.0,
+            action_smooth_coeff: float = 0.6,
+            closing_speed_reward_scale: float = 3.0,
+            projected_miss_reward_scale: float = 0.002,
+            cumulative_delta_v_soft_cap: float = 60.0,
+            cumulative_delta_v_exponent: float = 1.2,
     ):
-        """
-        Initialize the Satellite Avoidance Environment.
+        """Initialize the Satellite Avoidance Environment."""
+        super().__init__()
 
-        Args:
-            debris_positions (list of array-like): Initial positions of debris objects in meters.
-            max_debris (int): Maximum number of debris objects.
-            satellite_distance (float, optional): Desired orbit altitude in meters. If None, collision course is set.
-            init_angle (float, optional): Inclination angle in degrees. If None, collision course is set.
-            collision_course_probability (float): Probability to set the satellite on a collision course each episode.
-            enable_quantitative_metrics (bool): Enable tracking of quantitative performance metrics.
-            enable_qualitative_evaluation (bool): Enable recording of satellite trajectories for qualitative analysis.
-            enable_advanced_evaluation (bool): Enable advanced evaluation techniques like noise injection.
-            enable_visualization_tools (bool): Enable visualization tools for trajectory plotting.
-            enable_comparative_analysis (bool): Enable comparative analysis with baseline models.
-            enable_robustness_testing (bool): Enable robustness and generalization testing.
-        """
-        super(SatelliteAvoidanceEnv, self).__init__()
-
-        # Action space: changes in velocity in x, y, z directions (m/s^2)
-        self.action_space = spaces.Box(low=-0.1, high=0.1, shape=(3,), dtype=np.float32)
-
-        # Observation space: satellite position (3), velocity (3), fuel_mass (1), debris positions (max_debris * 3)
+        # Action and observation spaces
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
         self.max_debris = max_debris
-        obs_space_size = 7 + self.max_debris * 3  # 3 position + 3 velocity + 1 fuel_mass + debris positions
-        self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(obs_space_size,), dtype=np.float32
-        )
+        obs_space_size = 7 + self.max_debris * 3
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_space_size,), dtype=np.float32)
 
-        # Satellite initial parameters
-        self.satellite_mass = 1000.0  # kg
-        self.fuel_mass = 500.0  # kg
-        self.satellite_distance = satellite_distance  # Desired orbit altitude in meters
-        self.init_angle = init_angle  # Inclination angle in degrees
-
-        # Collision course probability
+        # Physical parameters
+        self.satellite_mass = 1000.0
+        self.fuel_mass = 500.0
+        self.satellite_distance = satellite_distance
+        self.init_angle = init_angle
         self.collision_course_probability = collision_course_probability
+        self.guarantee_collision = guarantee_collision
+        self.collision_ttc_steps = collision_ttc_steps
+        self._disable_gravity_steps = 0
+        self.debris_radius_m = float(debris_radius_m)
+        self.collision_point = None
+        self.max_thrust = float(max_thrust)  # m/s^2 per-axis acceleration at action=1.0
 
-        # Time settings
+        # Dynamic debris / lateral avoidance helpers
+        self.dynamic_debris = dynamic_debris
+        self.debris_lateral_speed = float(debris_lateral_speed)
+        self.lateral_offset_scale = float(lateral_offset_scale)
+        self.debris_velocities = [np.zeros(3) for _ in debris_positions]
+
+        # New tunables
+        self.collision_distance_m = None if collision_distance_m is None else float(collision_distance_m)
+        self.approach_speed_scale = float(approach_speed_scale)
+        self.start_offset_scale = float(start_offset_scale)
+
+        # New configurable reward shaping coefficients
+        self.collision_penalty = float(collision_penalty)
+        self.survival_reward = float(survival_reward)
+        self.distance_shaping_coeff = float(distance_shaping_coeff)
+        self.coast_bonus = float(coast_bonus)
+        self.delta_v_linear_cost = float(delta_v_linear_cost)
+        self.delta_v_quadratic_cost = float(delta_v_quadratic_cost)
+        self.large_burn_penalty = float(large_burn_penalty)
+        self.smoothness_penalty = float(smoothness_penalty)
+        self.cumulative_dv_penalty = float(cumulative_dv_penalty)
+        self.projected_miss_reward = float(projected_miss_reward)
+        self.milestone_reward = float(milestone_reward)
+
+        # Legacy reward shaping coefficients (for backward compatibility)
+        self.dv_linear_cost = float(dv_linear_cost)
+        self.dv_quadratic_cost = float(dv_quadratic_cost)
+        self.large_burn_threshold = float(large_burn_threshold)
+        self.large_burn_quadratic_cost = float(large_burn_quadratic_cost)
+        self.coast_bonus_legacy = float(coast_bonus_legacy)
+        self.danger_action_bonus = float(danger_action_bonus)
+        self.action_smooth_coeff = float(action_smooth_coeff)
+        self.closing_speed_reward_scale = float(closing_speed_reward_scale)
+        self.projected_miss_reward_scale = float(projected_miss_reward_scale)
+        self.cumulative_delta_v_soft_cap = float(cumulative_delta_v_soft_cap)
+        self.cumulative_delta_v_exponent = float(cumulative_delta_v_exponent)
+        self._prev_action = np.zeros(3, dtype=np.float32)
+        self.action_change_mag = 0.0
+
+        # Time and debris
         self.current_time = Time.now()
+        self.debris_positions = [np.array(d, dtype=np.float64) for d in debris_positions]
 
-        # Debris initialization
-        self.debris_positions = [np.array(debris, dtype=np.float64) for debris in debris_positions]
-
-        # Initialize the satellite orbit
+        # Initialize orbit
         self._init_satellite_orbit()
 
-        # Evaluation Flags
+        # Evaluation flags
         self.enable_quantitative_metrics = enable_quantitative_metrics
         self.enable_qualitative_evaluation = enable_qualitative_evaluation
         self.enable_advanced_evaluation = enable_advanced_evaluation
@@ -115,25 +193,23 @@ class SatelliteAvoidanceEnv(gym.Env):
         self.enable_comparative_analysis = enable_comparative_analysis
         self.enable_robustness_testing = enable_robustness_testing
 
-        # Initialize Evaluation Metrics
+        # Metrics containers
+        self.total_delta_v = []
+        self.min_distance = np.inf
+
         if self.enable_quantitative_metrics:
             self.reset_evaluation_metrics()
-
         if self.enable_qualitative_evaluation:
             self.trajectory = []
-
         if self.enable_comparative_analysis:
-            # Initialize baseline policy data
             self.baseline_collision_count = 0
             self.baseline_rewards = []
             self.baseline_delta_v = []
             self.baseline_min_distance = []
-
-            # Logging Setup for Comparative Analysis
             logging.basicConfig(
                 filename='baseline_comparative_analysis.log',
                 level=logging.INFO,
-                format='%(asctime)s:%(levelname)s:%(message)s'
+                format='%(asctime)s:%(levelname)s:%(message)s',
             )
             logging.info("Comparative Analysis Started.")
 
@@ -178,19 +254,10 @@ class SatelliteAvoidanceEnv(gym.Env):
         self.min_distance = np.inf  # Initialize minimum distance
 
     def _generate_debris_positions(self, num_debris):
-        """
-        Generate debris positions in Low Earth Orbit (LEO).
-
-        Args:
-            num_debris (int): Number of debris to generate.
-
-        Returns:
-            list of np.ndarray: List of debris positions in meters.
-        """
+        """Generate debris positions in Low Earth Orbit (LEO)."""
         debris_positions = []
         for _ in range(num_debris):
-            # Randomly distribute debris in LEO (160 km to 2000 km altitude)
-            altitude = np.random.uniform(160e3, 2000e3)  # meters
+            altitude = np.random.uniform(160e3, 2000e3)
             theta = np.random.uniform(0, 2 * np.pi)
             phi = np.random.uniform(0, np.pi)
             r = EARTH_RADIUS + altitude
@@ -199,119 +266,138 @@ class SatelliteAvoidanceEnv(gym.Env):
             z = r * np.cos(phi)
             debris_positions.append(np.array([x, y, z]))
         return debris_positions
-
     def reset(self, seed=None, options=None):
-        """
-        Reset the environment to an initial state.
-
-        Args:
-            seed (int, optional): Seed for random number generator.
-            options (dict, optional): Additional options for resetting.
-
-        Returns:
-            tuple: Initial observation and an empty info dictionary.
-        """
+        """Reset environment state; optionally set up a near head-on approach with optional lateral dynamics."""
         super().reset(seed=seed)
+
+        # Basic episode state
+        self.collision_point = None
+        self.current_step = 0
         self.current_time = Time.now()
         self.satellite_mass = 1000.0
         self.fuel_mass = 500.0
         self.elapsed_time = 0.0
 
-        # Determine if the satellite is on a collision course this episode
-        self.collision_course = np.random.rand() < self.collision_course_probability
+        # Decide forced collision
+        self.collision_course = True if self.guarantee_collision else (np.random.rand() < self.collision_course_probability)
+        self.collision_target_index = None
 
-        # Reinitialize debris positions
-        if self.enable_robustness_testing:
-            # Vary debris density for robustness testing
-            num_debris = np.random.randint(1, self.max_debris + 1)
-        else:
-            num_debris = np.random.randint(1, self.max_debris + 1)
+        # Debris field
+        num_debris = np.random.randint(1, self.max_debris + 1)
         self.debris_positions = self._generate_debris_positions(num_debris)
 
-        # Calculate time increment per step
-        self.time_increment = self.orbital_period / 500  # Adjust the denominator to control steps per orbit
+        # Default integration step
+        self.time_increment = self.orbital_period / 500
 
-        if self.collision_course:
-            # Select a random debris to collide with
-            if len(self.debris_positions) == 0:
-                # No debris to collide with; default to non-collision course
-                self.collision_course = False
+        # Scenario setup (feasibility-aware)
+        if self.collision_course and len(self.debris_positions) > 0:
+            self.collision_target_index = int(np.random.randint(len(self.debris_positions)))
+            target_debris = self.debris_positions[self.collision_target_index]
+            direction_vector = target_debris / max(np.linalg.norm(target_debris), 1e-9)
+
+            base_offset = max(self.debris_radius_m + 2000.0, D_COLLIDE + 10000.0)
+            start_offset = max(base_offset, 20000.0) * max(self.start_offset_scale, 1e-3)
+            approach_dt = min(1.0, self.orbital_period / 2000.0)
+            if self.collision_ttc_steps is not None:
+                steps_to_hit = int(np.clip(int(self.collision_ttc_steps), 2, 1000))
+                T = steps_to_hit * approach_dt
             else:
-                target_debris = self.debris_positions[np.random.randint(len(self.debris_positions))]
-                # Set satellite position slightly away from the debris
-                offset_distance = 5000  # meters; distance to start from the debris
-                direction_vector = target_debris / np.linalg.norm(target_debris)
-                self.satellite_position = target_debris + direction_vector * offset_distance
+                T = 60.0
+            self.time_increment = approach_dt
 
-                # Calculate velocity required to collide with the debris
-                # Instead of setting velocity directly towards debris, add a small component in that direction
-                base_velocity = np.linalg.norm(self.initial_orbit.v.to(u.m / u.s).value)  # m/s
+            relative_speed = (start_offset / max(T, 1e-6)) * self.approach_speed_scale
+            v0 = -direction_vector * relative_speed
 
-                # Define a tangential direction
-                # To ensure the orbit remains valid, compute a perpendicular vector
-                # Here, we choose the cross product with the z-axis; handle edge cases where direction_vector is parallel to z-axis
-                if not np.allclose(direction_vector, [0, 0, 1]):
-                    tangential_dir = np.cross(direction_vector, [0, 0, 1])
+            # Feasibility adjustment: ensure max achievable lateral displacement can exceed clearance
+            threshold = self.collision_distance_m if self.collision_distance_m is not None else max(D_COLLIDE, self.debris_radius_m)
+            buffer = getattr(self, 'safe_zone_buffer_m', 3000.0)
+            clearance_needed = threshold + buffer
+            achievable_disp = 0.5 * self.max_thrust * (T ** 2)
+            feasible = True
+            if achievable_disp < (clearance_needed + 500.0):
+                T_needed = np.sqrt(2 * (clearance_needed + 500.0) / max(self.max_thrust, 1e-9))
+                T_needed = float(min(T_needed, 1200.0))
+                if T_needed > T:
+                    T = T_needed
+                    relative_speed = start_offset / max(T, 1e-6) * self.approach_speed_scale
+                    v0 = -direction_vector * relative_speed
+                    steps_to_hit = int(np.clip(int(T / approach_dt), 2, 2000))
+                    self.collision_ttc_steps = steps_to_hit
                 else:
-                    tangential_dir = np.cross(direction_vector, [0, 1, 0])
-                tangential_dir /= np.linalg.norm(tangential_dir)
+                    feasible = False
+                achievable_disp = 0.5 * self.max_thrust * (T ** 2)
+            self.achievable_lateral_disp = achievable_disp
+            self.clearance_needed = clearance_needed
+            self.scenario_feasible = feasible
 
-                # Define a small delta_v towards the debris
-                delta_v_magnitude = 0.05 * base_velocity  # 5% of base velocity
+            p0 = target_debris + direction_vector * start_offset
 
-                # Update satellite_velocity with tangential and delta_v components
-                self.satellite_velocity = (
-                    tangential_dir * base_velocity +
-                    direction_vector * delta_v_magnitude
-                )
-
-                # Define initial_orbit based on new position and velocity
-                try:
-                    self.initial_orbit = Orbit.from_vectors(
-                        Earth,
-                        r=self.satellite_position * u.m,          # Correct keyword argument
-                        v=self.satellite_velocity * u.m / u.s,    # Correct keyword argument
-                        epoch=self.current_time
-                    )
-                except ZeroDivisionError as e:
-                    print(f"Error initializing orbit: {e}")
-                    self.initial_orbit = Orbit.circular(
-                        Earth,
-                        alt=700e3 * u.m,  # Fallback to default altitude
-                        inc=0 * u.deg,
-                        epoch=self.current_time
-                    )
-                    self.satellite_position = self.initial_orbit.r.to(u.m).value
-                    self.satellite_velocity = self.initial_orbit.v.to(u.m / u.s).value
-
-                # Recalculate orbital period
-                self.orbital_period = self.initial_orbit.period.to(u.s).value
-        else:
-            if self.satellite_distance is not None and self.init_angle is not None:
-                # Already initialized in _init_satellite_orbit
-                pass
+            if self.dynamic_debris:
+                trial = np.array([0.0, 0.0, 1.0])
+                if abs(np.dot(trial, direction_vector)) > 0.95:
+                    trial = np.array([0.0, 1.0, 0.0])
+                lateral_vec = np.cross(direction_vector, trial)
+                ln = np.linalg.norm(lateral_vec)
+                if ln < 1e-9:
+                    lateral_vec = np.array([1.0, 0.0, 0.0])
+                else:
+                    lateral_vec /= ln
+                lateral_offset = lateral_vec * np.random.uniform(-self.lateral_offset_scale, self.lateral_offset_scale)
+                p0 = target_debris + direction_vector * start_offset + lateral_offset
+                self.debris_velocities = [np.zeros(3) for _ in self.debris_positions]
+                self.debris_velocities[self.collision_target_index] = lateral_vec * self.debris_lateral_speed
             else:
-                # Set to default orbit
+                self.debris_velocities = [np.zeros(3) for _ in self.debris_positions]
+
+            self.satellite_position = p0
+            self.satellite_velocity = v0
+        else:
+            if not (self.satellite_distance is not None and self.init_angle is not None):
                 self.initial_orbit = Orbit.circular(
                     Earth,
-                    alt=700e3 * u.m,  # 700 km altitude
-                    inc=0 * u.deg,     # Equatorial orbit
+                    alt=700e3 * u.m,
+                    inc=0 * u.deg,
                     epoch=self.current_time
                 )
-                self.satellite_position = self.initial_orbit.r.to(u.m).value
-                self.satellite_velocity = self.initial_orbit.v.to(u.m / u.s).value
-                # Recalculate orbital period
-                self.orbital_period = self.initial_orbit.period.to(u.s).value
+            self.satellite_position = self.initial_orbit.r.to(u.m).value
+            self.satellite_velocity = self.initial_orbit.v.to(u.m / u.s).value
+            self.debris_velocities = [np.zeros(3) for _ in self.debris_positions]
 
-        # Reset Evaluation Metrics
         if self.enable_quantitative_metrics:
             self.reset_evaluation_metrics()
-
-        # Reset Trajectory
         if self.enable_qualitative_evaluation:
             self.trajectory = [self.satellite_position.copy()]
 
+        self.cumulative_delta_v = 0.0
+        self.first_burn_step = None
+        self.first_burn_time = None
+        self.safe_zone_entry_step = None
+        self.safe_zone_entry_time = None
+        self.previous_closing_speed = None
+        self.safe_zone_buffer_m = 3000.0
+        self._prev_action = np.zeros(3, dtype=np.float32)
+        self.action_change_mag = 0.0
+        self.current_projected_miss_distance = None
+
         return self._get_obs(), {}
+
+    def get_scenario_state(self):
+        """Return a serializable snapshot of the current scenario (post-reset) so it can be replayed.
+
+        Returns:
+            dict: scenario components required to recreate identical initial conditions.
+        """
+        return {
+            'satellite_position': np.array(self.satellite_position, dtype=float).copy(),
+            'satellite_velocity': np.array(self.satellite_velocity, dtype=float).copy(),
+            'fuel_mass': float(self.fuel_mass),
+            'debris_positions': [np.array(d, dtype=float).copy() for d in self.debris_positions],
+            'collision_course': bool(self.collision_course),
+            'collision_target_index': None if self.collision_target_index is None else int(self.collision_target_index),
+            'time_increment': float(self.time_increment),
+            'debris_radius_m': float(self.debris_radius_m),
+            'orbital_period': float(getattr(self, 'orbital_period', 0.0)),
+        }
 
     def _get_obs(self):
         """
@@ -364,126 +450,153 @@ class SatelliteAvoidanceEnv(gym.Env):
         a_total = a_earth + a_moon + a_sun
         self.satellite_velocity += a_total * self.time_increment
 
+    def _gravity_accel_at(self, pos_vec):
+        """Compute total gravitational acceleration (Earth + Moon + Sun) at an arbitrary position."""
+        r_vec = pos_vec
+        r_norm = np.linalg.norm(r_vec)
+        a_earth = -G_const * M_EARTH * r_vec / max(r_norm**3, 1e-12)
+
+        moon_pos = get_body_barycentric('moon', self.current_time).get_xyz().to(u.m).value.flatten()
+        earth_pos = get_body_barycentric('earth', self.current_time).get_xyz().to(u.m).value.flatten()
+        moon_pos_earth_centered = moon_pos - earth_pos
+        r_moon = moon_pos_earth_centered - pos_vec
+        r_moon_norm = np.linalg.norm(r_moon)
+        M_MOON = 7.34767309e22
+        a_moon = G_const * M_MOON * r_moon / max(r_moon_norm**3, 1e-12)
+
+        sun_pos = get_body_barycentric('sun', self.current_time).get_xyz().to(u.m).value.flatten()
+        sun_pos_earth_centered = sun_pos - earth_pos
+        r_sun = sun_pos_earth_centered - pos_vec
+        r_sun_norm = np.linalg.norm(r_sun)
+        M_SUN = 1.98847e30
+        a_sun = G_const * M_SUN * r_sun / max(r_sun_norm**3, 1e-12)
+
+        return a_earth + a_moon + a_sun
+
     def _apply_thrust(self, action):
-        """
-        Apply thrust to the satellite based on the agent's action.
+        """Apply thrust to the satellite based on the agent's action.
 
         Args:
-            action (np.ndarray): Velocity changes in x, y, z directions.
+            action (np.ndarray): Velocity changes in x, y, z directions (normalized -1..1).
         """
-        max_thrust = 0.1  # m/s^2 (acceleration)
-        thrust_acceleration = action * max_thrust
+        max_thrust = self.max_thrust
+        a = np.clip(action, -1.0, 1.0)
+        prev = self._prev_action
+        self.action_change_mag = float(np.linalg.norm(a - prev))
+        self._prev_action = a.astype(np.float32)
+        thrust_acceleration = a * max_thrust
         self.satellite_velocity += thrust_acceleration * self.time_increment
 
         specific_impulse = 300.0  # s
         g0 = 9.80665  # m/s^2
         delta_v = np.linalg.norm(thrust_acceleration * self.time_increment)
+        self.last_delta_v = float(delta_v)
         if delta_v > 0:
             fuel_consumed = self.satellite_mass * (1 - np.exp(-delta_v / (specific_impulse * g0)))
         else:
             fuel_consumed = 0.0
-
         self.fuel_mass -= fuel_consumed
         self.satellite_mass -= fuel_consumed
-
         if self.fuel_mass <= 0:
             self.fuel_mass = 0
-            print("Out of fuel!")
+            pass
 
     def _calculate_reward(self):
-        """
-        Calculate the reward for the current state and action.
+        """Fuel-efficient collision avoidance reward.
 
-        Returns:
-            tuple: (reward, done)
+        Principles:
+          1. Strong collision penalty.
+          2. Dense shaping for increasing projected miss distance & reducing closing speed.
+          3. Aggressive per-step delta-v cost (linear + quadratic) except in immediate danger.
+          4. Penalty for large impulsive burns & for jittery control (action change).
+          5. Soft cap on cumulative delta-v with accelerating penalty beyond cap.
+          6. Small survival/time reward so zero-action isn't trivially optimal if collision looms.
         """
+        # Unified small-scale reward (keep value targets ~ O(1-10))
         reward = 0.0
         done = False
 
-        # 1. Positive Reward for Each Step Survived
-        reward += 1.0
+        current_delta_v = float(getattr(self, 'last_delta_v', 0.0))
+        if len(self.debris_positions) > 0:
+            d_min = min(np.linalg.norm(self.satellite_position - d) for d in self.debris_positions)
+        else:
+            d_min = np.inf
 
-        # 2. Reward Proportional to Remaining Fuel
-        # Encourages the agent to conserve fuel
-        reward += 0.1 * self.fuel_mass
+        custom_collide = self.collision_distance_m if self.collision_distance_m is not None else None
+        base_collide = max(D_COLLIDE, self.debris_radius_m)
+        threshold = custom_collide if custom_collide is not None else base_collide
+        extended_safe_threshold = threshold + getattr(self, 'safe_zone_buffer_m', 3000.0)
 
-        # 3. Fuel Consumption Penalty
-        # Penalizes fuel usage to promote efficiency
-        fuel_consumed = 500.0 - self.fuel_mass
-        reward -= fuel_consumed * 0.1
+        # 1. Collision terminal
+        if d_min <= threshold:
+            # Configurable collision penalty
+            reward -= self.collision_penalty
+            done = True
+            if hasattr(self, 'collision_point'):
+                self.collision_point = self.satellite_position.copy()
+            return reward, done
 
-        # 4. Altitude Maintenance Penalty
-        desired_altitude = self.satellite_distance if self.satellite_distance is not None else 700e3
-        current_altitude = np.linalg.norm(self.satellite_position) - EARTH_RADIUS
-        altitude_error = np.abs(current_altitude - desired_altitude)
-        reward -= altitude_error * 0.01
+        # 2. Survival baseline
+        reward += self.survival_reward  # configurable survival tick
 
-        # 5. Bonus for Maintaining Desired Altitude within Threshold
-        altitude_threshold = 100.0  # meters
-        if altitude_error < altitude_threshold:
-            reward += 10.0  # Bonus reward
+        # 3. Distance shaping
+        if d_min > extended_safe_threshold:
+            dist_excess = d_min - extended_safe_threshold
+            # Softly cap distance shaping to avoid runaway values
+            capped = min(dist_excess, 8000.0)
+            reward += self.distance_shaping_coeff * capped
+            if current_delta_v < 0.005:
+                reward += self.coast_bonus  # configurable coast bonus
+        elif d_min < extended_safe_threshold:
+            gap = extended_safe_threshold - d_min
+            capped_gap = min(gap, 8000.0)
+            reward -= 0.00015 * capped_gap  # 8 km deficit => -1.2
 
-        # 6. Eccentricity Penalty
-        orbit_radius = np.linalg.norm(self.satellite_position)
-        orbit_velocity = np.linalg.norm(self.satellite_velocity)
-        specific_energy = 0.5 * orbit_velocity**2 - G_const * M_EARTH / orbit_radius
-        specific_angular_momentum = np.cross(self.satellite_position, self.satellite_velocity)
-        eccentricity_vector = np.cross(
-            self.satellite_velocity, specific_angular_momentum
-        ) / (G_const * M_EARTH) - self.satellite_position / orbit_radius
-        eccentricity = np.linalg.norm(eccentricity_vector)
-        reward -= eccentricity * 100.0
+        # 4. Closing speed & projected miss shaping
+        closing_speed = getattr(self, 'current_closing_speed', None)
+        proj_miss = getattr(self, 'current_projected_miss_distance', None)
+        if closing_speed is not None:
+            prev = self.previous_closing_speed
+            if prev is not None and prev > 0 and closing_speed < prev:
+                improvement = (prev - closing_speed) / max(prev, 1e-6)
+                reward += 0.5 * improvement  # bounded ~[0,0.5]
+            self.previous_closing_speed = closing_speed
+        if proj_miss is not None and proj_miss > threshold:
+            gain = proj_miss - threshold
+            reward += self.projected_miss_reward * min(gain, 15000.0)  # configurable projected miss reward
 
-        # 7. Collision Avoidance Reward
-        # Reward for maintaining safe distance from all debris
-        collision_penalty_triggered = False
-        safe_distance = 10e3  # meters
+        # 5. Delta-v cost (context-sensitive)
+        if current_delta_v > 0.0:
+            # Configurable delta-v costs
+            dv_cost = self.delta_v_linear_cost * current_delta_v + self.delta_v_quadratic_cost * (current_delta_v ** 2)
+            if d_min <= extended_safe_threshold:
+                dv_cost *= 0.6  # allow maneuvering when near
+            reward -= dv_cost
+            if current_delta_v > 0.2:
+                reward -= self.large_burn_penalty * (current_delta_v - 0.2) ** 2
+            if d_min < 1.15 * threshold and current_delta_v > 0.05:
+                reward += 0.3 * min(1.0, current_delta_v / 0.15)
+
+        # 6. Action smoothness penalty (penalize jitter)
+        if self.action_change_mag > 0.0 and current_delta_v < 0.25:
+            reward -= self.smoothness_penalty * (self.action_change_mag ** 2)
+
+        # 7. Soft cap on cumulative delta-v
+        if self.cumulative_delta_v > self.cumulative_delta_v_soft_cap:
+            over = self.cumulative_delta_v - self.cumulative_delta_v_soft_cap
+            reward -= self.cumulative_dv_penalty * (over ** 1.3)
+
+        # 8. Long episode bonus (encourage survival without burns)
+        if getattr(self, 'current_step', 0) % 100 == 0 and self.current_step > 0:
+            reward += self.milestone_reward
+
+        # Metrics tracking
+        self.total_delta_v.append(current_delta_v)
         for debris in self.debris_positions:
-            distance_to_debris = np.linalg.norm(self.satellite_position - debris)
-            if distance_to_debris < safe_distance:
-                # Collision occurred
-                reward -= 1000.0
-                done = True
-                collision_penalty_triggered = True
-                break  # Exit loop if collision occurs
-            else:
-                # Safe distance maintained; small positive reward
-                reward += 0.5
+            dist = np.linalg.norm(self.satellite_position - debris)
+            if dist < self.min_distance:
+                self.min_distance = dist
 
-        if not collision_penalty_triggered and self.enable_quantitative_metrics:
-            # Additional reward if all debris are safely distant
-            reward += 0.1 * len(self.debris_positions)
-
-        # 8. Penalty for Getting Too Close to Earth
-        r_norm = np.linalg.norm(self.satellite_position)
-        if r_norm < EARTH_RADIUS + 100e3:
-            reward -= 1000.0
-            done = True
-
-        # 9. Penalty for Escaping Earth's Gravity
-        elif r_norm > 1e8:
-            reward -= 1000.0
-            done = True
-
-        # 10. Time-Based Efficiency Penalty
-        reward -= 0.1
-
-        # Log Quantitative Metrics
-        if self.enable_quantitative_metrics:
-            # Accumulate rewards
-            self.total_rewards.append(reward)
-            # Accumulate steps
-            self.total_steps.append(1)  # Each step increments by 1
-            # Accumulate delta-v usage
-            delta_v = np.linalg.norm(self.satellite_velocity * self.time_increment)
-            self.total_delta_v.append(delta_v)
-            # Track minimum distance
-            for debris in self.debris_positions:
-                distance = np.linalg.norm(self.satellite_position - debris)
-                if distance < self.min_distance:
-                    self.min_distance = distance
-
-        # Log Trajectory for Qualitative Evaluation
         if self.enable_qualitative_evaluation:
             self.trajectory.append(self.satellite_position.copy())
 
@@ -499,33 +612,111 @@ class SatelliteAvoidanceEnv(gym.Env):
         Returns:
             tuple: (observation, reward, done, truncated, info)
         """
+        # Increment step counter
+        if not hasattr(self, 'current_step'):
+            self.current_step = 0
+        self.current_step += 1
+        
         # Apply thrust
         self._apply_thrust(action)
 
-        # Apply gravitational forces
-        self._apply_gravitational_force()
+        # Track cumulative delta-v & first burn
+        dv_step = float(getattr(self, 'last_delta_v', 0.0))
+        self.cumulative_delta_v += dv_step
+        if dv_step > 0.02 and self.first_burn_step is None:
+            self.first_burn_step = int(self.current_step)
+            self.first_burn_time = float(self.elapsed_time)
+
+        # Apply gravitational forces (optionally disabled for guaranteed-collision setup)
+        if self._disable_gravity_steps > 0:
+            self._disable_gravity_steps -= 1
+        else:
+            self._apply_gravitational_force()
 
         # Update satellite's position based on velocity and time increment
         self.satellite_position += self.satellite_velocity * self.time_increment
+
+        # Update debris positions if dynamic model enabled
+        if self.dynamic_debris and len(self.debris_velocities) == len(self.debris_positions):
+            for i, vel in enumerate(self.debris_velocities):
+                self.debris_positions[i] = self.debris_positions[i] + vel * self.time_increment
 
         # Update the current time and elapsed time
         self.current_time += self.time_increment * u.s
         self.elapsed_time += self.time_increment
 
+        # Compute relative kinematics to target debris (if any) for logging & shaping
+        relative_closing_speed = None
+        projected_miss_distance = None
+        # Ensure debris_velocities length matches debris_positions length (can desync on scenario replay)
+        if len(self.debris_velocities) != len(self.debris_positions):
+            self.debris_velocities = [np.zeros(3) for _ in self.debris_positions]
+        if self.collision_target_index is not None and 0 <= self.collision_target_index < len(self.debris_positions):
+            target_pos = self.debris_positions[self.collision_target_index]
+            rel_pos = target_pos - self.satellite_position
+            # Base relative velocity assumes debris static unless dynamic debris enabled
+            if self.dynamic_debris and self.collision_target_index < len(self.debris_velocities):
+                base_debris_vel = self.debris_velocities[self.collision_target_index]
+            else:
+                base_debris_vel = np.zeros(3)
+            rel_vel = (base_debris_vel - self.satellite_velocity)
+            r_norm = np.linalg.norm(rel_pos)
+            if r_norm > 1e-6:
+                radial_speed = -np.dot(rel_pos, rel_vel) / r_norm  # >0 means closing
+                relative_closing_speed = float(radial_speed)
+                # Linear projection time to closest approach (if closing)
+                if radial_speed > 1e-3:
+                    t_ca = r_norm / radial_speed
+                    proj_rel = rel_pos + rel_vel * t_ca
+                    projected_miss_distance = float(np.linalg.norm(proj_rel))
+                else:
+                    projected_miss_distance = float(r_norm)
+            self.current_closing_speed = relative_closing_speed
+            self.current_projected_miss_distance = projected_miss_distance
+
         # Calculate reward and check for termination
         reward, done = self._calculate_reward()
+        termination_reason = None
 
         # Check if fuel is depleted
         if self.fuel_mass <= 0:
             done = True
+            termination_reason = termination_reason or "fuel_depleted"
 
         # Optionally, set 'done' to True after a full orbit
         if self.elapsed_time >= self.orbital_period:
             done = True
+            termination_reason = termination_reason or "orbit_complete"
 
         truncated = False  # Can be set to True based on specific conditions
 
-        return self._get_obs(), reward, done, truncated, {}
+        # Provide info for metrics and debugging
+        d_min = None
+        if len(self.debris_positions) > 0:
+            d_min = float(min(np.linalg.norm(self.satellite_position - d) for d in self.debris_positions))
+        custom_collide = self.collision_distance_m if getattr(self, 'collision_distance_m', None) is not None else None
+        threshold = custom_collide if custom_collide is not None else max(D_COLLIDE, self.debris_radius_m)
+        if d_min is not None and d_min <= threshold:
+            termination_reason = termination_reason or "collision"
+            # Record approximate collision point
+            self.collision_point = self.satellite_position.copy()
+        info = {
+            "fuel_mass": float(self.fuel_mass),
+            "elapsed_time": float(self.elapsed_time),
+            "min_distance": d_min,
+            "collision_occurred": d_min is not None and d_min <= threshold,
+            "last_delta_v": float(getattr(self, 'last_delta_v', 0.0)),
+            "termination_reason": termination_reason,
+            "cumulative_delta_v": float(self.cumulative_delta_v),
+            "first_burn_step": None if self.first_burn_step is None else int(self.first_burn_step),
+            "safe_zone_entry_step": None if self.safe_zone_entry_step is None else int(self.safe_zone_entry_step),
+            "relative_closing_speed": relative_closing_speed,
+            "projected_miss_distance": projected_miss_distance,
+            "scenario_feasible": getattr(self, 'scenario_feasible', True),
+            "achievable_lateral_disp": float(getattr(self, 'achievable_lateral_disp', 0.0)),
+            "clearance_needed": float(getattr(self, 'clearance_needed', 0.0)),
+        }
+        return self._get_obs(), reward, done, truncated, info
 
     def render(self, mode='human'):
         """
@@ -641,13 +832,13 @@ class SatelliteAvoidanceEnv(gym.Env):
             total_delta_v.append(delta_v_total)
             min_distances.append(min_distance)
             trajectories.append(trajectory)
-
-            # Save trajectory for visualization
+            # Save trajectory & optionally visualize
             if self.enable_visualization_tools:
                 self.save_trajectory(episode_num=episode+1)
-                self.run_visualization(episode_num=episode+1)
+                if self.dynamic_debris:
+                    self.run_visualization(episode_num=episode+1)
 
-            # Log baseline metrics
+            # Log baseline metrics per episode if comparative analysis enabled
             if self.enable_comparative_analysis:
                 self.baseline_rewards.append(cumulative_reward)
                 self.baseline_delta_v.append(delta_v_total)

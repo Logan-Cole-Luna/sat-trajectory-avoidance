@@ -1,0 +1,95 @@
+# Enhanced Training Configuration for Improved RL Performance v2
+
+# python train_sat.py 
+
+vec_env: dummy   # dummy for deterministic training
+num_envs: 8      # Increased parallel environments
+device: cpu
+
+train:
+  # Training duration - focused session
+  total_timesteps: 1000000  # 1M timesteps for faster iteration
+  eval_freq: 20000         # Frequent evaluation to monitor improvement
+  checkpoint_freq: 100000
+  disable_eval: false
+  
+  # Resume training configuration
+  resume:
+    enabled: False 
+    model_path: "models/train/ppo_checkpoint_400000_steps.zip"  # Latest checkpoint
+    start_timestep: 400000  # Timesteps already completed
+  
+  # Collision system configuration
+  collision:
+    guarantee: false  # Mix of collision and non-collision scenarios
+    probability: 1.0  # Slightly lower for better balance
+    ttc_steps: 20
+  debris_radius_m: 50.0  # Moderate challenge
+  
+  # Physical parameters
+  max_thrust: 0.15    # Increased from 0.05 for feasible avoidance maneuvers
+  
+  # Reward shaping parameters for improved collision avoidance - OPTIMIZED V2
+  reward:
+    collision_penalty: 50.0        # Further reduced penalty for better exploration (was 100)
+    survival_reward: 2.0           # Increased survival incentive (was 1.0)
+    distance_shaping_coeff: 1.0    # Stronger distance shaping (was 0.5)
+    coast_bonus: 3.0               # Stronger coasting bonus when safe (was 2.0)
+    delta_v_linear_cost: 0.5       # Further reduced for exploration (was 1.0)
+    delta_v_quadratic_cost: 0.05   # Minimal quadratic cost (was 0.1)
+    large_burn_penalty: 0.5        # Minimal large burn penalty (was 1.0)
+    smoothness_penalty: 0.0005     # Minimal smoothness penalty (was 0.001)
+    cumulative_dv_penalty: 0.02    # Minimal cumulative penalty (was 0.05)
+    projected_miss_reward: 2.0     # Strong projected miss reward (was 1.0)
+    milestone_reward: 10.0         # Very strong milestone reward (was 5.0)
+  
+  # PPO Hyperparameters - Optimized for exploration and collision avoidance learning
+  n_steps: 4096        # Longer rollouts for better learning (was 2048)
+  batch_size: 128      # Smaller batches for stability (was 256)
+  n_epochs: 5          # Fewer epochs to prevent overfitting (was 10)
+  
+  # Learning rate and regularization - Better exploration
+  learning_rate: 0.0001  # Lower learning rate for stability (was 0.0003)
+  lr_schedule: "linear"  # Linear decay for better convergence (was constant)
+  ent_coef: 0.05        # Much higher entropy for exploration (was 0.01)
+  vf_coef: 0.25         # Lower value function coefficient (was 0.5)
+  max_grad_norm: 1.0    # Higher gradient norm (was 0.5)
+  
+  # Advanced parameters for better convergence and exploration
+  gamma: 0.99          # Higher discount factor (was 0.995)
+  gae_lambda: 0.95     # GAE parameter (unchanged)
+  clip_range: 0.3      # Higher clip range for more flexibility (was 0.2)
+  target_kl: 0.05      # Higher target KL to allow more exploration (was 0.01)
+  net_arch: [512, 512, 256]  # Larger network for better learning (was [256, 256, 128])
+
+# Curriculum Learning Configuration - OPTIMIZED for maximum avoidance learning
+curriculum:
+  enabled: true
+  stages:
+    - name: "exploration_phase"
+      timesteps: 250000
+      collision_probability: 0.1    # Very low collision rate for initial exploration (was 0.3)
+      debris_radius_m: 25.0
+    - name: "basic_avoidance"
+      timesteps: 250000
+      collision_probability: 0.4    # Moderate collision rate (was 0.6)
+      debris_radius_m: 35.0
+    - name: "intermediate"
+      timesteps: 250000
+      collision_probability: 0.7    # Higher collision rate (was 0.8)
+      debris_radius_m: 50.0
+    - name: "advanced"
+      timesteps: 250000
+      collision_probability: 1.0    # Full collision rate
+      debris_radius_m: 75.0         # Smaller than before for achievable difficulty
+
+
+# Testing after training - Use representative difficulty
+test:
+  steps: 1000
+  collision_probability: 1      
+  debris_radius_m: 10.0           
+  collision_distance_m: 300.0   
+  ttc_steps: 250                  
+  max_thrust: 5                 
+  guarantee_collision: false      

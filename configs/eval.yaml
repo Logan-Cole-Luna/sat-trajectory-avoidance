@@ -1,0 +1,69 @@
+# Evaluation Configuration for RL Model Testing
+
+# python utils\eval\extended_evaluation.py --scenarios 5 --dynamic-debris --debris-lateral-speed 50 --lateral-offset-scale 12000 --start-offset-scales 2.0,3.0 --approach-speed-scales 0.6,0.4 --collision-distances 6000,5000 --eval-max-thrusts 0.3,0.35 --ttc-steps 400 --max-steps 400 --model models/train/satellite_avoidance_model_final.zip
+
+evaluation:
+  # Model to evaluate
+  model:
+    path: "models/train/ppo_checkpoint_400000_steps.zip"
+    type: "policy"  # policy, no_action, or compare
+  
+  # Evaluation parameters
+  episodes: 30          # Number of episodes to run
+  deterministic: true   # Use deterministic policy
+  render: false        # Don't render during evaluation (for speed)
+  
+  # Environment configuration (should match training)
+  environment:
+    collision_probability: 0.8
+    guarantee_collision: false
+    collision_ttc_steps: 20
+    debris_radius_m: 100.0
+    enable_quantitative_metrics: true
+    max_debris: 5
+  
+  # Output configuration
+  output:
+    save_animation: true    # Save HTML animation
+    save_gif: false        # Skip GIF to avoid hangs
+    animation_filename: "episode_animation_policy"
+    results_filename: "evaluation_results"
+    
+  # Multi-run evaluation
+  multi_run:
+    enabled: false
+    runs: 3
+    episodes_per_run: 20
+    aggregate_stats: true
+    save_plots: true
+
+# Animation export settings
+animation:
+  enabled: true
+  gif: false
+  backend: plotly  # plotly | matplotlib
+  max_frames: 90
+  width: 640
+  height: 480
+  scale: 1
+  span_min: 50   # km
+  span_max: 400  # km
+  span_scale: 0.8
+
+# Classical baseline comparison
+baselines:
+  enabled: false
+  methods: ["hohmann", "impulsive", "conjunction"]
+  episodes: 20
+
+# Enhanced scenarios testing
+enhanced_scenarios:
+  enabled: false
+  difficulty_levels: ["easy", "medium", "hard"]
+  episodes_per_level: 15
+
+# Monte Carlo validation
+monte_carlo:
+  enabled: false
+  scenarios: 100
+  confidence_level: 0.95
