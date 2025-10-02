@@ -1,22 +1,9 @@
 # satellite_avoidance_env.py
 
 import numpy as np
-try:
-    import gymnasium as gym
-except Exception:
-    # Minimal fallback so this module can be imported without gymnasium installed
-    class _EnvBase(object):
-        pass
-    class gym:  # type: ignore
-        Env = _EnvBase
-try:
-    from gymnasium import spaces
-except Exception:
-    class _Box:
-        def __init__(self, low, high, shape, dtype):
-            self.low = low; self.high = high; self.shape = shape; self.dtype = dtype
-    class spaces:  # type: ignore
-        Box = _Box
+from typing import List, Optional
+import gymnasium as gym
+from gymnasium import spaces
 from astropy import units as u
 from poliastro.bodies import Earth
 from poliastro.twobody import Orbit
@@ -752,30 +739,91 @@ class SatelliteAvoidanceEnv(gym.Env):
         Returns:
             np.ndarray: Action representing velocity changes in x, y, z directions.
         """
-        # Extract satellite position and debris positions from observation
-        satellite_pos = obs[:3]
-        debris_pos = obs[4:]  # Assuming debris positions start from index 4
-        debris_pos = debris_pos.reshape(-1, 3)
+        # Leverage internal state to derive relative kinematics instead of relying on the
+        # padded observation array (which may include dummy debris entries).
+        sat_pos = np.asarray(self.satellite_position, dtype=float)
+        sat_vel = np.asarray(self.satellite_velocity, dtype=float)
 
-        # Define safe distance
-        safe_distance = 1e4  # meters
+        if len(self.debris_positions) == 0:
+            return np.zeros(3, dtype=np.float32)
 
-        for debris in debris_pos:
-            distance = np.linalg.norm(satellite_pos - debris)
-            if distance < safe_distance:
-                # Compute avoidance direction (away from debris)
-                direction = satellite_pos - debris
-                direction_norm = np.linalg.norm(direction)
-                if direction_norm == 0:
-                    direction = np.random.randn(3)
-                    direction_norm = np.linalg.norm(direction)
-                direction = direction / direction_norm
-                # Apply a small delta-v in the avoidance direction
-                action = direction * 0.1  # Scaling factor for maneuver strength
-                return action
+        # Collision threshold used by the environment (meters).
+        base_threshold = self.collision_distance_m
+        if base_threshold is None:
+            base_threshold = max(D_COLLIDE, self.debris_radius_m)
 
-        # No maneuver needed
-        return np.zeros(3)
+        # React well before impact to give the rule-based policy a fighting chance.
+        caution_distance = max(2.5 * base_threshold, 3000.0)
+        danger_distance = max(4.0 * base_threshold, 6000.0)
+        ttc_limit = 240.0  # seconds until closest approach to trigger avoidance
+        ttc_critical = 120.0
+
+        best_score = 0.0
+        best_action: Optional[np.ndarray] = None
+
+        debris_velocities: List[np.ndarray]
+        if len(getattr(self, "debris_velocities", [])) == len(self.debris_positions):
+            debris_velocities = [np.asarray(v, dtype=float) for v in self.debris_velocities]
+        else:
+            debris_velocities = [np.zeros(3, dtype=float) for _ in self.debris_positions]
+
+        for idx, debris in enumerate(self.debris_positions):
+            debris_pos = np.asarray(debris, dtype=float)
+            rel_pos = debris_pos - sat_pos
+            distance = float(np.linalg.norm(rel_pos))
+            if not np.isfinite(distance) or distance <= 1e-6:
+                continue
+
+            rel_vel = debris_velocities[idx] - sat_vel
+            rel_speed = float(np.linalg.norm(rel_vel))
+
+            # Closing speed projection (>0 indicates approaching).
+            radial_speed = -float(np.dot(rel_pos, rel_vel) / distance)
+            if radial_speed <= 0.0 and distance > caution_distance:
+                # Debris is receding or already distant -> low risk.
+                continue
+
+            if radial_speed > 1e-5:
+                time_to_closest = distance / radial_speed
+            else:
+                time_to_closest = np.inf
+
+            # Risk score blends distance and time-to-collision pressure.
+            proximity_score = max(0.0, (danger_distance - distance) / danger_distance)
+            timing_score = 0.0 if not np.isfinite(time_to_closest) else max(0.0, (ttc_limit - time_to_closest) / ttc_limit)
+            risk_score = proximity_score + timing_score
+            if radial_speed > 0.0 and time_to_closest < ttc_critical:
+                risk_score += 0.5
+
+            if risk_score <= 0.0:
+                continue
+
+            # Base thrust away from the debris.
+            away_dir = -rel_pos / distance
+
+            if radial_speed > 0.0 and rel_speed > 1e-6:
+                # Add component opposing the relative velocity to bleed closing speed.
+                vel_dir = -rel_vel / (rel_speed + 1e-8)
+                away_dir = away_dir + 0.5 * vel_dir
+
+            norm = float(np.linalg.norm(away_dir))
+            if norm > 1e-6:
+                away_dir = away_dir / norm
+            else:
+                away_dir = np.zeros(3)
+
+            # Scale burns more aggressively the higher the perceived risk.
+            thrust_mag = float(np.clip(0.25 + 0.75 * risk_score, 0.0, 1.0))
+            candidate = away_dir * thrust_mag
+
+            if risk_score > best_score and np.any(candidate):
+                best_score = risk_score
+                best_action = candidate
+
+        if best_action is not None:
+            return best_action.astype(np.float32)
+
+        return np.zeros(3, dtype=np.float32)
 
     def evaluate_baseline(self, num_episodes=100):
         """

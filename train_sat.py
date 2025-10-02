@@ -8,15 +8,24 @@ import numpy as np
 import requests
 from sgp4.api import Satrec, jday
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 from stable_baselines3 import PPO
+import gymnasium as gym
+import gymnasium as gym
+from gymnasium import spaces
+from astropy import units as u
+from poliastro.bodies import Earth
+from poliastro.twobody import Orbit
+from astropy.time import Time
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from stable_baselines3.common.monitor import Monitor
+import psutil
 from stable_baselines3.common.callbacks import EvalCallback, BaseCallback, CheckpointCallback
 import os
 import yaml
+import tensorboard
 from typing import Dict
 import json
 from utils.eval.satellite_avoidance_env import SatelliteAvoidanceEnv
@@ -654,7 +663,7 @@ if __name__ == '__main__':
         model.clip_range = lambda _: clip_range_val  # Make it callable
         model.target_kl = float(cfg.get("train", {}).get("target_kl", 0.01))
         
-        print("✅ Model loaded successfully for resuming")
+        print("Model loaded successfully for resuming")
     else:
         print("Creating new PPO model")
         model = PPO(
@@ -665,7 +674,7 @@ if __name__ == '__main__':
             device=device_opt,
             # Improved hyperparameters for orbital mechanics
             n_steps=int(cfg.get("train", {}).get("n_steps", 2048)),
-            batch_size=int(cfg.get("train", {}).get("batch_size", 257)),
+            batch_size=int(cfg.get("train", {}).get("batch_size", 256)),
             n_epochs=int(cfg.get("train", {}).get("n_epochs", 10)),
             learning_rate=learning_rate,
             ent_coef=float(cfg.get("train", {}).get("ent_coef", 0.005)),
