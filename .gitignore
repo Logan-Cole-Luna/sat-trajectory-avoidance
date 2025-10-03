@@ -1,0 +1,51 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Python caches and environments
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+.env/
+
+# Build/dist
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# Project artifacts to ignore
+# Large evaluation outputs and logs
+results/
+results*/
+**/plots/
+**/events.out.tfevents.*
+
+# Checkpoints and intermediate training artifacts (keep curated model zips at root if needed)
+models/train/
+**/checkpoints/
+
+# Data dumps and heavy arrays (only under results/)
+results/**/*.csv
+results/**/*.json
+results/**/*.npz
+results/**/*.npy
+results/**/*.html
+
+# TensorBoard
+logs/
+**/logs/**
+
+# Misc archives in results
+results/**/*.zip

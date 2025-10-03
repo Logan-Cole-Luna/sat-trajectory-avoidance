@@ -24,6 +24,7 @@ def create_evaluation_env(debris_positions, collision_course_probability=1.0):
         satellite_distance=None,  # Optional: Not set to ensure collision course
         init_angle=None,          # Optional: Not set to ensure collision course
         collision_course_probability=collision_course_probability,
+        guarantee_collision=True,
         enable_quantitative_metrics=True,
         enable_qualitative_evaluation=True,
         enable_advanced_evaluation=True,
@@ -270,7 +271,7 @@ def main():
     )
 
     # Load the trained model
-    model = PPO.load("satellite_avoidance_model_combined")
+    model = PPO.load("models\satellite_avoidance_model_combined.zip")
 
     # Define output folder
     output_folder = "evaluation_results"

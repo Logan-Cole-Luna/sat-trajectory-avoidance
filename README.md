@@ -97,6 +97,12 @@ python implement_sat.py
 python train_sat.py
 ```
 
+### Ealuate Satellite Model
+
+```bash
+python evaluate_sat.py --model models/satellite_avoidance_model.zip --episodes 1000
+```
+
 ## Data
 The project uses TLE data from CelesTrak, stored in the tle_data/ directory. Ensure the TLE files are up-to-date for accurate simulations.
 
