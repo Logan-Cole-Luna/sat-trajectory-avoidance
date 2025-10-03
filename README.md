@@ -19,9 +19,6 @@
 ## Overview
 
 This project implements an AI-powered satellite trajectory projection and collision avoidance system using reinforcement learning. It combines real-world satellite tracking data (TLE - Two-Line Element sets) with a Proximal Policy Optimization (PPO) model to predict and avoid potential collisions with space debris and other satellites.
-It achieves:
-- **7.69% reduction in collision rates** compared to baseline.
-- **15.89% improvement in orbit stability** through optimized velocity adjustments.
 
 ### Video Demonstration of Training
 | _Blue_: Active Satellites in orbit | _Red_: Debris in orbit | _Green_: Predicted trajectory for model|
@@ -32,10 +29,18 @@ It achieves:
 
 ## Performance Metrics and Key Results
 
-| Metric              | PPO Model      | Baseline Policy |
-|---------------------|----------------|-----------------|
-| Collision Rate      | -7.69%         | Reference Value |
-| Orbit Stability     | +15.89%        | Reference Value |
+Evaluation summary (1,000 scenarios; deterministic seeds):
+
+| Policy           | Success Rate | Collision Rate |
+|------------------|--------------|----------------|
+| PPO (learned)    | ~97.5%       | ~2.5%          |
+| Impulsive ΔV     | ~27.5%       | ~72.5%         |
+| Rule-based       | ~20.7%       | ~79.3%         |
+| No action        | 0%           | 100%           |
+
+Notes:
+- “Success” = survived to episode horizon without collision (some runs may end via fuel depletion).
+- Artifacts include per-episode aggregates, time series, termination counts, and plots under `results/evaluation/<timestamp>/`.
 
 ## Features
 
@@ -45,6 +50,9 @@ It achieves:
 - **Dynamic Orbit Scaling**: Adjusts orbit scales for improved visualization.
 - **Gravitational Influence Modeling**: Accounts for Earth's and Moon's gravitational effects on satellite orbits.
 - **Performance Metrics Tracking**: Logs and analyzes performance metrics during simulations.
+- **Deterministic Evaluator & Plots**: Generates per-episode/per-policy CSVs and plots (collision rates, Δv usage, min distance, termination reasons).
+- **Per-Component Rewards**: Exports survival, distance, closing, Δv penalties, smoothness, milestones, and collision penalties per episode.
+- **Multiple Baselines**: Compare PPO against rule-based, impulsive ΔV, and no-action baselines.
 
 <div style="display: flex; justify-content: center; align-items: center;">
   <img src="misc/gen_media/CorrectOrbit.png" alt="Satellite Correct Orbit" width="450" />
@@ -103,6 +111,11 @@ python train_sat.py
 python evaluate_sat.py --model models/satellite_avoidance_model.zip --episodes 1000
 ```
 
+Outputs are written to `results/evaluation/<timestamp>/` (ignored by git). You’ll get:
+- `policy_aggregates.csv`, `termination_reasons.csv`, `all_policies_per_episode.csv`
+- Optional time series and plots under `plots/`
+- Reward component means and per-episode component CSVs
+
 ## Data
 The project uses TLE data from CelesTrak, stored in the tle_data/ directory. Ensure the TLE files are up-to-date for accurate simulations.
 
@@ -122,6 +135,15 @@ Performance metrics such as collision counts, reward accumulation, delta-v usage
 
 ## Current Results
 
+### Baselines Compared
+
+- PPO (learned policy)
+- Rule-based risk-aware controller (lateral push-away when within unsafe distance)
+- Impulsive ΔV (finite-duration lateral thrust to approximate an instantaneous Δv pre-TCA)
+- No action (do nothing)
+
+Brief note on impulsive baseline: In classical astrodynamics, an “impulsive” burn models an instantaneous Δv with no position change; we approximate this with sustained lateral acceleration over several steps due to thrust limits.
+
 ### Baseline Function For Evaluation:
 <img src="misc/gen_media/Baseline.png" alt="Baseline Function" width="800" />
 
@@ -129,8 +151,9 @@ Performance metrics such as collision counts, reward accumulation, delta-v usage
 - **No Action**: Maintains current trajectory if no debris is within the unsafe distance.
 
 ### Model Performance Overview
-- **Collision Reduction**: Agents learned effective collision avoidance strategies, resulting in a 7.69% reduction in collision rate compared to the baseline policy.
-- **Orbit Stability**: Achieved stable orbits with 15.89% fewer steps on average, utilizing optimized velocity changes to reduce mission duration.
+- PPO achieves ~97.5% collision-free episodes on 1,000 scenarios; rule-based ~20.7%; impulsive ΔV ~27.5%; no-action 0%.
+- PPO yields larger average separation at closest approach and uses more Δv than heuristics (trading fuel for safety).
+- Termination breakdowns and reward component tables are exported per evaluation run.
 
 ### Error Analysis
 - **Delta-v Efficiency**: While prioritizing collision avoidance, the PPO models consumed more delta-v than the baseline.
