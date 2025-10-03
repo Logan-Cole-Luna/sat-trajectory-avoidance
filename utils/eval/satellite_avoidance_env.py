@@ -366,6 +366,18 @@ class SatelliteAvoidanceEnv(gym.Env):
         self.action_change_mag = 0.0
         self.current_projected_miss_distance = None
 
+        # Reward component accumulators (per-episode totals)
+        self.reward_components = {
+            'survival': 0.0,
+            'distance': 0.0,
+            'closing': 0.0,
+            'milestone': 0.0,
+            'dv_penalty': 0.0,
+            'smooth_penalty': 0.0,
+            'cumulative_penalty': 0.0,
+            'collision_penalty': 0.0,
+        }
+
         return self._get_obs(), {}
 
     def get_scenario_state(self):
@@ -518,6 +530,8 @@ class SatelliteAvoidanceEnv(gym.Env):
         if d_min <= threshold:
             # Configurable collision penalty
             reward -= self.collision_penalty
+            # Component accounting
+            self.reward_components['collision_penalty'] -= float(self.collision_penalty)
             done = True
             if hasattr(self, 'collision_point'):
                 self.collision_point = self.satellite_position.copy()
@@ -525,19 +539,25 @@ class SatelliteAvoidanceEnv(gym.Env):
 
         # 2. Survival baseline
         reward += self.survival_reward  # configurable survival tick
+        self.reward_components['survival'] += float(self.survival_reward)
 
         # 3. Distance shaping
         if d_min > extended_safe_threshold:
             dist_excess = d_min - extended_safe_threshold
             # Softly cap distance shaping to avoid runaway values
             capped = min(dist_excess, 8000.0)
-            reward += self.distance_shaping_coeff * capped
+            inc = self.distance_shaping_coeff * capped
+            reward += inc
+            self.reward_components['distance'] += float(inc)
             if current_delta_v < 0.005:
                 reward += self.coast_bonus  # configurable coast bonus
+                self.reward_components['distance'] += float(self.coast_bonus)
         elif d_min < extended_safe_threshold:
             gap = extended_safe_threshold - d_min
             capped_gap = min(gap, 8000.0)
-            reward -= 0.00015 * capped_gap  # 8 km deficit => -1.2
+            dec = 0.00015 * capped_gap  # 8 km deficit => -1.2
+            reward -= dec
+            self.reward_components['distance'] -= float(dec)
 
         # 4. Closing speed & projected miss shaping
         closing_speed = getattr(self, 'current_closing_speed', None)
@@ -546,11 +566,15 @@ class SatelliteAvoidanceEnv(gym.Env):
             prev = self.previous_closing_speed
             if prev is not None and prev > 0 and closing_speed < prev:
                 improvement = (prev - closing_speed) / max(prev, 1e-6)
-                reward += 0.5 * improvement  # bounded ~[0,0.5]
+                inc = 0.5 * improvement  # bounded ~[0,0.5]
+                reward += inc
+                self.reward_components['closing'] += float(inc)
             self.previous_closing_speed = closing_speed
         if proj_miss is not None and proj_miss > threshold:
             gain = proj_miss - threshold
-            reward += self.projected_miss_reward * min(gain, 15000.0)  # configurable projected miss reward
+            inc = self.projected_miss_reward * min(gain, 15000.0)  # configurable projected miss reward
+            reward += inc
+            self.reward_components['distance'] += float(inc)
 
         # 5. Delta-v cost (context-sensitive)
         if current_delta_v > 0.0:
@@ -559,23 +583,34 @@ class SatelliteAvoidanceEnv(gym.Env):
             if d_min <= extended_safe_threshold:
                 dv_cost *= 0.6  # allow maneuvering when near
             reward -= dv_cost
+            self.reward_components['dv_penalty'] -= float(dv_cost)
             if current_delta_v > 0.2:
-                reward -= self.large_burn_penalty * (current_delta_v - 0.2) ** 2
+                extra = self.large_burn_penalty * (current_delta_v - 0.2) ** 2
+                reward -= extra
+                self.reward_components['dv_penalty'] -= float(extra)
             if d_min < 1.15 * threshold and current_delta_v > 0.05:
-                reward += 0.3 * min(1.0, current_delta_v / 0.15)
+                inc = 0.3 * min(1.0, current_delta_v / 0.15)
+                reward += inc
+                # Attribute this small incentive to 'closing' as it's proximity-conditioned
+                self.reward_components['closing'] += float(inc)
 
         # 6. Action smoothness penalty (penalize jitter)
         if self.action_change_mag > 0.0 and current_delta_v < 0.25:
-            reward -= self.smoothness_penalty * (self.action_change_mag ** 2)
+            dec = self.smoothness_penalty * (self.action_change_mag ** 2)
+            reward -= dec
+            self.reward_components['smooth_penalty'] -= float(dec)
 
         # 7. Soft cap on cumulative delta-v
         if self.cumulative_delta_v > self.cumulative_delta_v_soft_cap:
             over = self.cumulative_delta_v - self.cumulative_delta_v_soft_cap
-            reward -= self.cumulative_dv_penalty * (over ** 1.3)
+            dec = self.cumulative_dv_penalty * (over ** 1.3)
+            reward -= dec
+            self.reward_components['cumulative_penalty'] -= float(dec)
 
         # 8. Long episode bonus (encourage survival without burns)
         if getattr(self, 'current_step', 0) % 100 == 0 and self.current_step > 0:
             reward += self.milestone_reward
+            self.reward_components['milestone'] += float(self.milestone_reward)
 
         # Metrics tracking
         self.total_delta_v.append(current_delta_v)
@@ -702,6 +737,7 @@ class SatelliteAvoidanceEnv(gym.Env):
             "scenario_feasible": getattr(self, 'scenario_feasible', True),
             "achievable_lateral_disp": float(getattr(self, 'achievable_lateral_disp', 0.0)),
             "clearance_needed": float(getattr(self, 'clearance_needed', 0.0)),
+            "reward_components": {k: float(v) for k, v in self.reward_components.items()},
         }
         return self._get_obs(), reward, done, truncated, info
 

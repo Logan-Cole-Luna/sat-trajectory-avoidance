@@ -31,8 +31,8 @@ from utils.eval.satellite_avoidance_env import SatelliteAvoidanceEnv
 from utils.eval.eval_plotting import generate_policy_plots
 
 
-DEFAULT_MODEL_PATH = "models/train/satellite_avoidance_model_final.zip"
-DEFAULT_CONFIG_PATH = "configs/train.yaml"
+DEFAULT_MODEL_PATH = "models/satellite_avoidance_model.zip"
+DEFAULT_CONFIG_PATH = "configs/eval.yaml"
 DEFAULT_OUTPUT_DIR = "results/evaluation"
 
 
@@ -239,6 +239,7 @@ def evaluate_policy(
     scenario_snapshots: List[Dict[str, Any]] = [] if capture_scenarios else []
     episode_termination_reasons: List[Optional[str]] = []
     episode_time_series: List[Dict[str, List[float]]] = []
+    episode_reward_components: List[Dict[str, float]] = []
     total_steps_across_episodes = 0
 
     eval_start_time = time.perf_counter()
@@ -341,6 +342,15 @@ def evaluate_policy(
                 "delta_v_step": per_step_delta_v,
             }
         )
+        # Snapshot per-episode reward components from latest info (env accumulates totals)
+        rc = info.get("reward_components") if isinstance(info, dict) else None
+        if isinstance(rc, dict):
+            try:
+                episode_reward_components.append({k: float(v) for k, v in rc.items()})
+            except Exception:
+                episode_reward_components.append({})
+        else:
+            episode_reward_components.append({})
 
         env.close()
         total_steps_across_episodes += steps
@@ -393,6 +403,7 @@ def evaluate_policy(
         "termination_reasons": dict(termination_counter),
         "termination_reasons_per_episode": episode_termination_reasons,
         "time_series": episode_time_series,
+        "reward_components": episode_reward_components,
     }
     if capture_scenarios:
         per_episode["scenario_blueprints"] = scenario_snapshots
@@ -669,6 +680,7 @@ def _save_metrics_and_plots(base_dir: str, json_path: str, payload: Dict[str, An
     episode_frames: List[Any] = []
     termination_frames: List[Any] = []
     time_series_frames: List[Any] = []
+    reward_component_frames: List[Any] = []
     aggregate_rows: List[Dict[str, Any]] = []
 
     results = payload.get("results", {}) or {}
@@ -692,6 +704,30 @@ def _save_metrics_and_plots(base_dir: str, json_path: str, payload: Dict[str, An
             ts_path = os.path.join(per_episode_dir, f"{_slugify(policy_name)}_time_series.csv")
             df_time_series.to_csv(ts_path, index=False)
 
+        # Reward components per-episode (if available)
+        rc_list = per_episode.get("reward_components", []) or []
+        if isinstance(rc_list, list) and len(rc_list) > 0:
+            # Normalize dicts to same keys
+            all_keys = set()
+            for d in rc_list:
+                if isinstance(d, dict):
+                    all_keys.update(d.keys())
+            rows_rc: List[Dict[str, Any]] = []
+            for idx, d in enumerate(rc_list, start=1):
+                row = {"policy": policy_name, "episode": idx}
+                if isinstance(d, dict):
+                    for k in all_keys:
+                        try:
+                            row[k] = float(d.get(k, 0.0))
+                        except Exception:
+                            row[k] = float("nan")
+                rows_rc.append(row)
+            df_rc = pd.DataFrame(rows_rc)
+            if not df_rc.empty:
+                reward_component_frames.append(df_rc)
+                rc_path = os.path.join(per_episode_dir, f"{_slugify(policy_name)}_reward_components.csv")
+                df_rc.to_csv(rc_path, index=False)
+
         if aggregate:
             row = {"policy": policy_name}
             row.update(aggregate)
@@ -702,6 +738,7 @@ def _save_metrics_and_plots(base_dir: str, json_path: str, payload: Dict[str, An
     aggregates_df = pd.DataFrame(aggregate_rows) if aggregate_rows else None
     time_series_df = pd.concat(time_series_frames, ignore_index=True) if time_series_frames else None
     time_series_stats = _compute_time_series_stats(time_series_df) if time_series_df is not None else None
+    reward_components_df = pd.concat(reward_component_frames, ignore_index=True) if reward_component_frames else None
 
     if combined_df is not None and not combined_df.empty:
         combined_df.to_csv(os.path.join(base_dir, "all_policies_per_episode.csv"), index=False)
@@ -717,6 +754,15 @@ def _save_metrics_and_plots(base_dir: str, json_path: str, payload: Dict[str, An
 
     if time_series_stats is not None and not time_series_stats.empty:
         time_series_stats.to_csv(os.path.join(base_dir, "time_series_stats.csv"), index=False)
+
+    if reward_components_df is not None and not reward_components_df.empty:
+        reward_components_df.to_csv(os.path.join(base_dir, "all_policies_reward_components.csv"), index=False)
+        # Also emit simple per-policy means for convenience
+        # Identify component columns (exclude policy/episode)
+        comp_cols = [c for c in reward_components_df.columns if c not in {"policy", "episode"}]
+        if comp_cols:
+            rc_means = reward_components_df.groupby("policy")[comp_cols].mean(numeric_only=True).reset_index()
+            rc_means.to_csv(os.path.join(base_dir, "reward_component_means.csv"), index=False)
 
     generate_policy_plots(base_dir, combined_df, termination_df, aggregates_df, time_series_df, time_series_stats)
 
@@ -850,26 +896,24 @@ def main() -> None:
         return action.astype(env.action_space.dtype)
 
     def impulsive_maneuver_action_fn(env: SatelliteAvoidanceEnv, obs: np.ndarray) -> np.ndarray:
-        """Impulsive ΔV planning baseline.
+        """Sustained lateral-accel avoidance (impulsive-style plan, acceleration-limited).
 
-        Plan a single lateral burn to increase miss distance beyond a safety
-        threshold at predicted time of closest approach (TCA) using a simple
-        linear relative-motion approximation.
+        The environment maps action directly to acceleration (|a| <= max_thrust),
+        so a single-step "impulse" cannot create a large Δv. Here we compute a
+        constant-acceleration plan towards the lateral perpendicular direction
+        and apply it over many steps until the predicted TCA window elapses or
+        the projected miss distance exceeds the safety clearance.
 
-        Strategy per episode:
-        - Identify target debris (use env.collision_target_index if available, else nearest now).
-        - Compute relative state r0, v_rel.
-        - Predict TCA: t* = - (r0·v_rel) / |v_rel|^2; clamp to [0, horizon].
-        - Desired lateral separation at TCA: clearance = threshold + buffer.
-          Current predicted miss distance m0 = |r0_perp|. Need d_req = max(0, clearance - m0).
-        - Required lateral Δv ≈ d_req / (t_remain). Apply once immediately in the
-          perpendicular direction n = normalize(r0_perp). Clip by action bounds.
-
-        Because the environment translates per-step action to acceleration
-        (max_thrust) over time_increment, per-step Δv_max ≈ max_thrust * dt for |action|=1.
+        Plan on first call per episode, then return the cached action for a
+        fixed number of steps. Falls back to coasting if no maneuver is needed.
         """
-        # Ensure caching per episode on the env instance
-        if getattr(env, "_impulse_executed", False):
+        # Reuse plan if one exists for this episode
+        plan = getattr(env, "_imp_plan", None)
+        if plan is not None:
+            if plan.get("steps_remaining", 0) > 0:
+                plan["steps_remaining"] -= 1
+                return np.asarray(plan["action"], dtype=env.action_space.dtype)
+            # Plan complete; stop thrusting
             return np.zeros(env.action_space.shape, dtype=env.action_space.dtype)
 
         try:
@@ -883,7 +927,6 @@ def main() -> None:
             # Choose target debris
             tgt_idx = getattr(env, "collision_target_index", None)
             if tgt_idx is None or tgt_idx >= len(debris_positions) or tgt_idx < 0:
-                # Fallback: nearest debris by current range
                 dists = [float(np.linalg.norm(np.asarray(d, dtype=float) - sat_pos)) for d in debris_positions]
                 tgt_idx = int(np.argmin(dists)) if dists else 0
             tgt_pos = np.asarray(debris_positions[int(tgt_idx)], dtype=float)
@@ -892,16 +935,17 @@ def main() -> None:
             r0 = sat_pos - tgt_pos
             v_rel = sat_vel - tgt_vel
             v2 = float(np.dot(v_rel, v_rel))
-            if not np.isfinite(v2) or v2 < 1e-12:
-                # Relative velocity too small: thrust directly away slightly
-                away = r0 / max(np.linalg.norm(r0), 1e-9)
-                env._impulse_executed = True
-                return (away * 0.5).astype(env.action_space.dtype)
-
-            t_star = -float(np.dot(r0, v_rel)) / v2
-            t_star = float(np.clip(t_star, 0.0, 1200.0))  # cap horizon to 20 minutes
             dt = float(getattr(env, "time_increment", 1.0))
-            # Compute perpendicular component of r0
+            if not np.isfinite(v2) or v2 < 1e-12:
+                # If relative motion is tiny, just push away moderately for a short window
+                away = r0 / max(np.linalg.norm(r0), 1e-9)
+                action = (away * 0.5)
+                env._imp_plan = {"action": action, "steps_remaining": int(max(1, math.ceil(5.0 / max(dt, 1e-6))))}
+                return np.asarray(action, dtype=env.action_space.dtype)
+
+            # Predict TCA and perpendicular miss now
+            t_star = -float(np.dot(r0, v_rel)) / v2
+            t_star = float(np.clip(t_star, 0.0, 1200.0))
             v_hat = v_rel / max(np.linalg.norm(v_rel), 1e-9)
             r_perp = r0 - np.dot(r0, v_hat) * v_hat
             miss_now = float(np.linalg.norm(r_perp))
@@ -914,36 +958,39 @@ def main() -> None:
             clearance = float(base_thresh) + buffer
 
             d_req = max(0.0, clearance - miss_now)
-            if d_req <= 0.0:
-                env._impulse_executed = True
+            if d_req <= 0.0 or t_star <= 0.0:
+                env._imp_plan = {"action": np.zeros(env.action_space.shape), "steps_remaining": 0}
                 return np.zeros(env.action_space.shape, dtype=env.action_space.dtype)
 
-            t_remain = max(t_star, dt)
-            dv_req = d_req / t_remain  # m/s needed laterally
-
-            # Map to action via per-step dv capability
-            max_thrust = float(getattr(env, "max_thrust", 0.05))  # m/s^2 per-axis at |action|=1
-            dv_per_step_unit = max_thrust * dt  # m/s for |action|=1 over one step
-            if dv_per_step_unit <= 0:
-                env._impulse_executed = True
-                return np.zeros(env.action_space.shape, dtype=env.action_space.dtype)
-
-            scale = float(np.clip(dv_req / dv_per_step_unit, 0.0, 1.0))
+            # Constant acceleration needed to produce displacement d_req in t_star: a = 2 d / t^2
+            a_req = 2.0 * d_req / max(t_star ** 2, 1e-6)
+            max_thrust = float(getattr(env, "max_thrust", 0.05))
+            mag = float(np.clip(a_req / max_thrust, 0.0, 1.0))
 
             # Direction: perpendicular to v_rel, aligned with r_perp
-            n = r_perp / max(np.linalg.norm(r_perp), 1e-9)
-            action = n * scale
+            if np.linalg.norm(r_perp) < 1e-9:
+                # Pick any unit vector perpendicular to v_rel
+                trial = np.array([1.0, 0.0, 0.0])
+                if abs(np.dot(trial, v_hat)) > 0.95:
+                    trial = np.array([0.0, 1.0, 0.0])
+                n = np.cross(v_hat, trial)
+                n_norm = np.linalg.norm(n)
+                n = n / max(n_norm, 1e-9)
+            else:
+                n = r_perp / max(np.linalg.norm(r_perp), 1e-9)
 
-            # Clip to action space bounds
+            action = n * mag
+            # Clip to bounds
             low = getattr(env.action_space, "low", -1.0)
             high = getattr(env.action_space, "high", 1.0)
-            action = np.clip(action, low, high).astype(env.action_space.dtype)
-            # Single impulsive step
-            env._impulse_executed = True
-            return action
+            action = np.clip(action, low, high)
+
+            # Number of steps to sustain the burn (up to t_star)
+            steps_needed = int(max(1, math.ceil(t_star / max(dt, 1e-6))))
+            env._imp_plan = {"action": action, "steps_remaining": steps_needed}
+            return action.astype(env.action_space.dtype)
         except Exception:
-            # Fallback: no thrust
-            env._impulse_executed = True
+            env._imp_plan = {"action": np.zeros(env.action_space.shape), "steps_remaining": 0}
             return np.zeros(env.action_space.shape, dtype=env.action_space.dtype)
 
     ppo_aggregate, ppo_per_episode, scenarios, ppo_performance = evaluate_policy(
@@ -979,16 +1026,16 @@ def main() -> None:
         show_progress=args.progress,
     )
 
-    legacy_aggregate, legacy_per_episode, _, legacy_performance = evaluate_policy(
-        "baseline_legacy",
-        env_kwargs,
-        seeds,
-        legacy_baseline_action_fn,
-        max_steps=args.max_steps,
-        scenario_save_limit=scenario_limit,
-        capture_scenarios=False,
-        show_progress=args.progress,
-    )
+    #legacy_aggregate, legacy_per_episode, _, legacy_performance = evaluate_policy(
+    #    "baseline_legacy",
+    #    env_kwargs,
+    #    seeds,
+    #    legacy_baseline_action_fn,
+    #    max_steps=args.max_steps,
+    #    scenario_save_limit=scenario_limit,
+    #    capture_scenarios=False,
+    #    show_progress=args.progress,
+    #)
 
     no_action_aggregate, no_action_per_episode, _, no_action_performance = evaluate_policy(
         "no_action",
@@ -1020,7 +1067,7 @@ def main() -> None:
         "performance": {
             "ppo": ppo_performance,
             "baseline_impulsive": impulsive_performance,
-            "baseline_legacy": legacy_performance,
+            #"baseline_legacy": legacy_performance,
             "baseline_rule": baseline_performance,
             "no_action": no_action_performance,
         },
@@ -1035,11 +1082,11 @@ def main() -> None:
                 "per_episode": impulsive_per_episode,
                 "performance": impulsive_performance,
             },
-            "baseline_legacy": {
-                "aggregate": legacy_aggregate,
-                "per_episode": legacy_per_episode,
-                "performance": legacy_performance,
-            },
+            #"baseline_legacy": {
+            #    "aggregate": legacy_aggregate,
+            #    "per_episode": legacy_per_episode,
+            #    "performance": legacy_performance,
+            #},
             "baseline_rule": {
                 "aggregate": baseline_aggregate,
                 "per_episode": baseline_per_episode,
@@ -1115,7 +1162,7 @@ def main() -> None:
     print("\n=== Evaluation summary ===")
     _print_policy_summary("PPO (trained)", ppo_aggregate)
     _print_policy_summary("Baseline (impulsive ΔV)", impulsive_aggregate)
-    _print_policy_summary("Baseline (legacy)", legacy_aggregate)
+    #_print_policy_summary("Baseline (legacy)", legacy_aggregate)
     _print_policy_summary("Baseline (rule-based)", baseline_aggregate)
     _print_policy_summary("Baseline (no-action)", no_action_aggregate)
     print(f"\nSummary saved to:  {summary_path}")

@@ -68,11 +68,11 @@ curriculum:
   stages:
     - name: "easy_start"
       timesteps: 250000
-      collision_probability: 1.0
+      collision_probability: 0.4
       debris_radius_m: 25.0
     - name: "moderate"
       timesteps: 350000
-      collision_probability: 1.0
+      collision_probability: 0.6
       debris_radius_m: 50.0
     - name: "challenging"
       timesteps: 400000
